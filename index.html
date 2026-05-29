@@ -2201,7 +2201,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
 
   const total = items.reduce((s,i)=>s + (i.amount || 0) * (i.qty || 1), 0);
   
-  const updateStock = async (productId, quantity, type, reason) => {
+  const updateStock = (productId, quantity, type, reason) => {
     const product = products.find(p => p.id === productId);
     if (!product) return;
     if (product.stock === null || product.stock === undefined || product.stock === -1) return;
@@ -2210,42 +2210,29 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
     setProducts(updatedProducts);
     OfflineStore.set(session.shopId, "products", updatedProducts);
     const movement = { id: Date.now().toString(36)+Math.random().toString(36).slice(2), productId, productName: product.name, quantity, type, reason, timestamp: Date.now() };
-    setStockMovements([movement, ...stockMovements]);
+    setStockMovements(prev => [movement, ...prev]);
     OfflineStore.set(session.shopId, "stock_movements", [movement, ...stockMovements]);
+    // Fire-and-forget : pas d'await — ne bloque pas la caisse
     if(db) {
-      await db.collection("shops").doc(session.shopId).collection("products").doc(productId).update({ stock: newStock });
-      await db.collection("shops").doc(session.shopId).collection("stock_movements").doc(movement.id).set(movement);
+      db.collection("shops").doc(session.shopId).collection("products").doc(productId).update({ stock: newStock }).catch(()=>{});
+      db.collection("shops").doc(session.shopId).collection("stock_movements").doc(movement.id).set(movement).catch(()=>{});
     }
   };
 
-  const addSale = async (saleItems, saleTotal, print=true, saleNote="") => {
-    for (const item of saleItems) {
-      const product = products.find(p => p.id === item.productId);
-      if (product && product.stock !== null && product.stock !== undefined && product.stock !== -1) {
-        await updateStock(item.productId, - (item.qty || 1), "sortie", `Vente #${Date.now()}`);
-      }
-    }
+  // ── addSale optimisé : ticket instantané, persistance en arrière-plan ──
+  const addSale = (saleItems, saleTotal, print=true, saleNote="") => {
+    // 1. État local immédiat (synchrone) — panier vidé sans attendre le réseau
     const newSale = { id: Date.now().toString(36)+Math.random().toString(36).slice(2), date: new Date().toISOString().slice(0,10), timestamp: Date.now(), items: saleItems, total: saleTotal, invoiceNum: Date.now(), cancelled: false, caissier: currentCaissier?.name || null, note: saleNote||null };
-    setSales([...sales, newSale]);
+    setSales(prev => [...prev, newSale]);
     OfflineStore.set(session.shopId, "sales", [...sales, newSale]);
-    auditLog.add(session.shopId, "vente", `Vente ${fmtPrice(saleTotal)} · ${saleItems.length} article(s)`, currentCaissier?.name||"Admin");
-    if(db && navigator.onLine) {
-      db.collection("shops").doc(session.shopId).collection("sales").doc(newSale.id).set(newSale).catch(()=>{ offlineQueue.push(session.shopId, newSale); });
-    } else if (!navigator.onLine) {
-      offlineQueue.push(session.shopId, newSale);
-    }
-    // Notification stock bas après vente
-    const lowStockItems = saleItems.filter(item => {
-      const prod = products.find(p=>p.id===item.productId);
-      return prod && prod.stock !== undefined && prod.stock !== null && prod.stock !== -1 && (prod.stock - (item.qty||1)) <= 3;
-    });
-    if (lowStockItems.length > 0) {
-      triggerNotification("⚠️ Stock bas", lowStockItems.map(it=>it.label).join(", ") + " — stock faible");
-    }
+    setItems([]);
+
+    // 2. Impression immédiate — ne bloque pas, ticket sort instantanément
     if(print) {
       try {
         if (useBLE && printer.connected) {
-          await printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo);
+          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo)
+            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo));
           flashMsg(`✅ Vente + impression BLE ${ticketFormat}`);
         } else {
           printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo);
@@ -2258,7 +2245,34 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
     } else {
       flashMsg("✅ Vente enregistrée");
     }
-    setItems([]);
+
+    // 3. Persistance en arrière-plan (fire-and-forget — n'impacte plus l'UX)
+    setTimeout(() => {
+      // Décrémenter le stock
+      for (const item of saleItems) {
+        const product = products.find(p => p.id === item.productId);
+        if (product && product.stock !== null && product.stock !== undefined && product.stock !== -1) {
+          updateStock(item.productId, -(item.qty || 1), "sortie", `Vente #${newSale.id}`);
+        }
+      }
+      // Audit
+      auditLog.add(session.shopId, "vente", `Vente ${fmtPrice(saleTotal)} · ${saleItems.length} article(s)`, currentCaissier?.name||"Admin");
+      // Sauvegarde Firestore
+      if(db && navigator.onLine) {
+        db.collection("shops").doc(session.shopId).collection("sales").doc(newSale.id).set(newSale)
+          .catch(() => offlineQueue.push(session.shopId, newSale));
+      } else if (!navigator.onLine) {
+        offlineQueue.push(session.shopId, newSale);
+      }
+      // Alerte stock bas
+      const lowStockItems = saleItems.filter(item => {
+        const prod = products.find(p=>p.id===item.productId);
+        return prod && prod.stock !== undefined && prod.stock !== null && prod.stock !== -1 && (prod.stock - (item.qty||1)) <= 3;
+      });
+      if (lowStockItems.length > 0) {
+        triggerNotification("⚠️ Stock bas", lowStockItems.map(it=>it.label).join(", ") + " — stock faible");
+      }
+    }, 0);
   };
 
   const addCredit = async (saleItems, saleTotal, clientName) => {
