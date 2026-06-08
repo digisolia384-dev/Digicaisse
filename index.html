@@ -1638,94 +1638,172 @@ const COL = 42; // default 80mm
 
 async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo) {
   const C = col || COL_80;
+  const is80 = C >= COL_80;
   const buf = [];
   const push = (arr) => buf.push(...arr);
+
+  // ── Encodage caractères (Latin-1 étendu pour accents) ───────
   const text = (str) => {
     for (let i = 0; i < str.length; i++) {
-      let code = str.charCodeAt(i);
+      const code = str.charCodeAt(i);
       if (code >= 32 && code <= 126) buf.push(code);
-      else if (code === 0xE9 || code === 0xE8) buf.push(0x65);
-      else if (code === 0xE0) buf.push(0x61);
-      else if (code === 0xF9) buf.push(0x75);
-      else if (code === 0xE7) buf.push(0x63);
+      else if (code === 0xE9 || code === 0xE8 || code === 0xEA) buf.push(0x65); // é è ê → e
+      else if (code === 0xE0 || code === 0xE2) buf.push(0x61);                   // à â → a
+      else if (code === 0xF9 || code === 0xFB) buf.push(0x75);                   // ù û → u
+      else if (code === 0xE7) buf.push(0x63);                                     // ç → c
+      else if (code === 0xEE) buf.push(0x69);                                     // î → i
+      else if (code === 0xF4) buf.push(0x6F);                                     // ô → o
+      else buf.push(0x20);
     }
   };
   const line = (str) => { text(str); push([LF]); };
-  
-  push([ESC, 0x40]);
-  push([ESC, 0x61, 0x01]);
+  const emptyLine = () => push([LF]);
+
+  // ── Taille normale (reset) ───────────────────────────────────
+  // GS ! n : bit 0-2 = largeur, bit 4-6 = hauteur (0=x1, 1=x2, 3=x4)
+  const sizeNormal  = () => push([GS, 0x21, 0x00]); // x1 / x1
+  const sizeMedium  = () => push([GS, 0x21, 0x11]); // x2 largeur + x2 hauteur
+  const sizeLarge   = () => push([GS, 0x21, 0x11]); // idem (x2)
+  const boldOn      = () => push([ESC, 0x45, 0x01]);
+  const boldOff     = () => push([ESC, 0x45, 0x00]);
+  const alignCenter = () => push([ESC, 0x61, 0x01]);
+  const alignLeft   = () => push([ESC, 0x61, 0x00]);
+
+  // ── INIT ────────────────────────────────────────────────────
+  push([ESC, 0x40]);           // Reset imprimante
+  push([ESC, 0x74, 0x00]);     // Page de codes PC437
 
   // ── Logo ────────────────────────────────────────────────────
+  alignCenter();
   if (shopLogo) {
     try {
-      const maxPx = C <= COL_57 ? 384 : 576;
+      const maxPx = is80 ? 512 : 384;
       const logoBytes = await logoToESCPOS(shopLogo, maxPx);
       push(logoBytes);
-      push([LF]);
+      emptyLine();
     } catch(e) { console.warn('Logo ESC/POS ignoré:', e); }
   }
 
-  push([ESC, 0x45, 0x01]);
-  line(shopName.toUpperCase().slice(0, C));
-  push([ESC, 0x45, 0x00]);
-  if (shopPhone) line("Tel: " + shopPhone);
-  
+  // ── En-tête commerce ────────────────────────────────────────
+  sizeLarge();
+  boldOn();
+  line(shopName.toUpperCase().slice(0, is80 ? 20 : 16));
+  boldOff();
+  sizeNormal();
+  if (shopPhone) { alignCenter(); line("Tel: " + shopPhone); }
+
+  // ── Date & N° ───────────────────────────────────────────────
   const d = new Date();
   const dateStr = `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
-  line(dateStr);
-  if (invoiceNum) line("N° " + String(invoiceNum).slice(-8));
-  
-  push([ESC, 0x61, 0x00]);
+  alignCenter();
+  line("TICKET DE CAISSE");
+  if (invoiceNum) line("N " + String(invoiceNum).slice(-12));
+  line("Date: " + dateStr);
+
+  // ── Séparateur ──────────────────────────────────────────────
+  alignLeft();
+  sizeNormal();
+  line("=".repeat(C));
+  boldOn(); line("ARTICLE / QTE" + " ".repeat(Math.max(1, C - 13 - 7)) + "MONTANT"); boldOff();
   line("-".repeat(C));
-  
-  const maxLabel = C <= COL_57 ? 18 : 28;
+
+  // ── Articles ────────────────────────────────────────────────
+  const maxLabel = is80 ? 22 : 16;
   items.forEach(it => {
-    const label = (it.label || "Article").slice(0, maxLabel);
     const qty = it.qty || 1;
     const price = it.amount;
     const totalLine = price * qty;
     const priceStr = fmtPrice(totalLine);
+    const label = (it.label || "Article").slice(0, maxLabel);
     const spaces = Math.max(1, C - label.length - priceStr.length);
+    sizeNormal();
     line(label + " ".repeat(spaces) + priceStr);
-    if (qty > 1) line("  @ " + fmtPrice(price));
+    if (qty > 1) {
+      const qtyStr = `  x${qty} @ ${fmtPrice(price)}`;
+      line(qtyStr);
+    }
   });
-  
-  line("-".repeat(C));
-  push([ESC, 0x45, 0x01]);
-  const totalStr = "TOTAL" + " ".repeat(Math.max(1, C - 5 - fmtPrice(total).length)) + fmtPrice(total);
-  line(totalStr);
-  push([ESC, 0x45, 0x00]);
+
+  // ── Total ───────────────────────────────────────────────────
   line("=".repeat(C));
-  
-  push([ESC, 0x61, 0x01]);
-  line("Merci pour votre achat !");
-  line(shopName.slice(0, C));
-  push([ESC, 0x64, 0x04]);
-  push([GS, 0x56, 0x41, 0x03]);
-  
+  alignCenter();
+  sizeMedium();
+  boldOn();
+  line("TOTAL: " + fmtPrice(total));
+  boldOff();
+  sizeNormal();
+
+  // ── Pied de ticket ──────────────────────────────────────────
+  emptyLine();
+  alignCenter();
+  line("Merci pour votre confiance !");
+  line("--- Digitale Solution ---");
+
+  // ── Avance papier + coupe ───────────────────────────────────
+  push([ESC, 0x64, 0x05]);      // Avancer 5 lignes
+  push([GS, 0x56, 0x41, 0x03]); // Coupe partielle
+
   return new Uint8Array(buf);
 }
 
-async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo) {
+async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies) {
   if (!printer.connected) throw new Error("Imprimante non connectée");
   const col = ticketFormat === "57mm" ? COL_57 : COL_80;
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  // Construire le ticket une fois, l'envoyer N fois
   const ticket = await buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo);
-  await printer.print(ticket);
+  for (let i = 0; i < copies; i++) {
+    await printer.print(ticket);
+    // Petite pause entre copies pour ne pas saturer le buffer BLE
+    if (i < copies - 1) await new Promise(r => setTimeout(r, 600));
+  }
   return true;
 }
 
-function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo) {
-  const w = ticketFormat === "57mm" ? "50mm" : "70mm";
-  let html = `<html><head><meta charset="utf-8"><title>Ticket</title><style>body{font-family:monospace;width:${w};margin:0 auto;padding:10px}.center{text-align:center}.item{display:flex;justify-content:space-between;margin:3px 0}.total{display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px dashed #000;font-weight:bold}</style></head><body>`;
-  if(shopLogo) html += `<div class="center"><img src="${shopLogo}" style="max-width:160px;max-height:60px;margin:0 auto 6px;display:block;" /></div>`;
-  html += `<div class="center bold">${shopName.toUpperCase()}</div>`;
-  if(shopPhone) html += `<div class="center">Tel: ${shopPhone}</div>`;
-  html += `<div class="center">${new Date().toLocaleString()}</div>`;
-  if(invoiceNum) html += `<div class="center">N° ${String(invoiceNum).slice(-8)}</div><hr>`;
-  items.forEach(it => { const qty=it.qty||1; html += `<div class="item"><span>${it.label}${qty>1?` x${qty}`:''}</span><span>${fmtPrice(it.amount*qty)}</span></div>`; if(qty>1) html += `<div style="font-size:10px;margin-left:8px;">@ ${fmtPrice(it.amount)}</div>`; });
-  html += `<hr><div class="total"><span>TOTAL</span><span>${fmtPrice(total)}</span></div><hr><div class="center">Merci !</div></body></html>`;
-  const win = window.open("", "_blank", "width=400,height=600");
-  if(win) { win.document.write(html); win.document.close(); win.print(); setTimeout(()=>win.close(),1500); }
+function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies) {
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  const w = ticketFormat === "57mm" ? "58mm" : "80mm";
+  const buildHtml = () => {
+    let html = `<html><head><meta charset="utf-8"><title>Ticket</title><style>
+      @page{size:${w} auto;margin:4mm}
+      body{font-family:'Courier New',monospace;width:${w};margin:0 auto;font-size:12px;line-height:1.5}
+      .center{text-align:center} .bold{font-weight:bold}
+      .shop{font-size:15px;font-weight:bold;text-align:center;margin:4px 0}
+      .sep{border:none;border-top:1px dashed #000;margin:6px 0}
+      .item{display:flex;justify-content:space-between;margin:2px 0}
+      .total-row{display:flex;justify-content:space-between;font-size:16px;font-weight:bold;padding:4px 0}
+      .footer{text-align:center;margin-top:6px;font-size:11px}
+    </style></head><body>`;
+    if(shopLogo) html += `<div class="center"><img src="${shopLogo}" style="max-width:${ticketFormat==="57mm"?120:180}px;max-height:60px;margin:0 auto 6px;display:block;" /></div>`;
+    html += `<div class="shop">${shopName.toUpperCase()}</div>`;
+    if(shopPhone) html += `<div class="center">Tel: ${shopPhone}</div>`;
+    html += `<div class="center">TICKET DE CAISSE</div>`;
+    if(invoiceNum) html += `<div class="center">N ${String(invoiceNum).slice(-12)}</div>`;
+    html += `<div class="center">${new Date().toLocaleString('fr-FR')}</div>`;
+    html += `<hr class="sep">`;
+    html += `<div class="item"><span><b>ARTICLE / QTE</b></span><span><b>MONTANT</b></span></div><hr class="sep">`;
+    items.forEach(it => {
+      const qty=it.qty||1;
+      html += `<div class="item"><span>${it.label}${qty>1?` x${qty}`:''}</span><span>${fmtPrice(it.amount*qty)}</span></div>`;
+      if(qty>1) html += `<div style="font-size:10px;margin-left:8px;color:#555">@ ${fmtPrice(it.amount)}</div>`;
+    });
+    html += `<hr class="sep"><div class="total-row"><span>TOTAL</span><span>${fmtPrice(total)}</span></div><hr class="sep">`;
+    html += `<div class="footer">Merci pour votre confiance !<br>--- Digitale Solution ---</div></body></html>`;
+    return html;
+  };
+  // Pour les copies : ouvrir une seule fenêtre et imprimer N fois via CSS @page copies
+  const win = window.open("", "_blank", "width=500,height=700");
+  if(win) {
+    let fullHtml = buildHtml();
+    // Injecter le nombre de copies via JS print
+    fullHtml = fullHtml.replace('</head>', `<style>@page{size:${w} auto;margin:4mm}</style></head>`);
+    win.document.write(fullHtml);
+    win.document.close();
+    win.onload = () => {
+      for(let i=0;i<copies;i++) win.print();
+      setTimeout(()=>win.close(), 1500 * copies);
+    };
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2193,6 +2271,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
   const [pinShake, setPinShake] = useState(false);
   const [useBLE, setUseBLE] = useState(true);
   const [ticketFormat, setTicketFormat] = useState(() => localStorage.getItem("pos_ticket_fmt") || "80mm");
+  const [nbCopies, setNbCopies] = useState(() => parseInt(localStorage.getItem("pos_ticket_copies") || "1"));
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [shopLogo, setShopLogo] = useState(session.shopLogo || null);
   const [caissDash, setCaissDash] = useState(false);
@@ -2231,15 +2310,15 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
     if(print) {
       try {
         if (useBLE && printer.connected) {
-          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo)
-            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo));
-          flashMsg(`✅ Vente + impression BLE ${ticketFormat}`);
+          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies)
+            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies));
+          flashMsg(`✅ Vente + impression BLE ${ticketFormat}${nbCopies>1?" x"+nbCopies+" copies":""}`);
         } else {
-          printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo);
-          flashMsg("✅ Vente + impression navigateur");
+          printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies);
+          flashMsg(`✅ Vente + impression navigateur${nbCopies>1?" x"+nbCopies+" copies":""}`);
         }
       } catch(e) {
-        printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo);
+        printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies);
         flashMsg("✅ Vente (fallback)");
       }
     } else {
@@ -2449,7 +2528,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
 
           {/* ── Desktop sidebar (hidden on mobile/tablet via CSS) ── */}
           <div className="desktop-sidebar" style={{background:T.surface, borderLeft:`1px solid ${T.border}`}}>
-            <PanierContent T={T} items={items} setItems={setItems} total={total} addSale={addSale} addCredit={addCredit} flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat} />
+            <PanierContent T={T} items={items} setItems={setItems} total={total} addSale={addSale} addCredit={addCredit} flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} />
           </div>
 
           {/* ── FAB panier mobile/tablette ── */}
@@ -2502,7 +2581,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
                     T={T} items={items} setItems={setItems} total={total}
                     addSale={(itms, tot, print) => { addSale(itms, tot, print); setMobileCartOpen(false); }}
                     addCredit={(itms,tot,name) => { addCredit(itms,tot,name); setMobileCartOpen(false); }}
-                    flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat}
+                    flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies}
                   />
                 </div>
               </div>
@@ -2512,7 +2591,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
       )}
       
       {ownerMode && (
-        <OwnerContent T={T} shopName={session.shopName} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} />
+        <OwnerContent T={T} shopName={session.shopName} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} />
       )}
     </div>
   );
@@ -2858,12 +2937,13 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
   );
 }
 
-function PanierContent({ T, items, setItems, total, addSale, addCredit, flashMsg, useBLE, ticketFormat }) {
+function PanierContent({ T, items, setItems, total, addSale, addCredit, flashMsg, useBLE, ticketFormat, nbCopies }) {
   const updateQty = (id, delta) => setItems(items.map(i=>i.id===id?{...i, qty:Math.max(1,(i.qty||1)+delta)}:i));
   const removeItem = (id) => setItems(items.filter(i=>i.id!==id));
   const clearCart = () => { if(confirm("Annuler toute la vente ?")) setItems([]); };
   const cartTotal = items.reduce((s,i)=>s+(i.qty||1),0);
-  const printLabel = useBLE ? `🖨️ BLE ${ticketFormat||"80mm"} + Valider` : "🖥️ Imprimer + Valider";
+  const copiesLabel = nbCopies > 1 ? ` x${nbCopies}` : "";
+  const printLabel = useBLE ? `🖨️ BLE ${ticketFormat||"80mm"}${copiesLabel} + Valider` : `🖥️ Imprimer${copiesLabel} + Valider`;
   const [creditModal, setCreditModal] = useState(false);
   const [clientName, setClientName] = useState("");
   // ── FONCTIONNALITÉ 4 : Remise ──────────────────────────────────
@@ -3865,7 +3945,7 @@ function SectionVentes({ T, sales, hasBeneficeData }) {
   );
 }
 
-function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale }) {
+function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale, ticketFormat, setTicketFormat, nbCopies, setNbCopies }) {
   const [tab, setTab] = useState("stats");
   const [showForm, setShowForm] = useState(false);
   const [editProd, setEditProd] = useState(null);
@@ -4452,6 +4532,36 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
       {/* ── PARAMÈTRES ── */}
       {tab==="settings" && (
         <div>
+          {/* ── Impression ── */}
+          <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
+            <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🖨️ Impression</div>
+            {/* Format ticket */}
+            <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Format du ticket</div>
+            <div style={{display:"flex", gap:8, marginBottom:14}}>
+              {[["80mm","80 mm"],["57mm","57 mm"]].map(([v,l])=>(
+                <button key={v} onClick={()=>{setTicketFormat(v); localStorage.setItem("pos_ticket_fmt",v); flashMsg(`📄 Format ${v}`);}}
+                  style={{flex:1, background:ticketFormat===v?T.accent:T.surface2, border:`2px solid ${ticketFormat===v?T.accent:T.border}`, borderRadius:12, padding:10, fontWeight:700, color:ticketFormat===v?T.bg:T.text, fontSize:13}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            {/* Nombre de copies */}
+            <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Nombre de copies par ticket</div>
+            <div style={{display:"flex", gap:8, alignItems:"center"}}>
+              {[1,2,3,4].map(n=>(
+                <button key={n} onClick={()=>{setNbCopies(n); localStorage.setItem("pos_ticket_copies",String(n)); flashMsg(`🖨️ ${n} copie${n>1?"s":""} par ticket`);}}
+                  style={{flex:1, background:nbCopies===n?T.accent:T.surface2, border:`2px solid ${nbCopies===n?T.accent:T.border}`, borderRadius:12, padding:10, fontWeight:800, color:nbCopies===n?T.bg:T.text, fontSize:15}}>
+                  {n}
+                </button>
+              ))}
+            </div>
+            {nbCopies > 1 && (
+              <div style={{marginTop:8, background:T.btnBlue.bg, borderRadius:10, padding:"6px 12px", fontSize:10, color:T.blue, fontWeight:600}}>
+                ℹ️ {nbCopies} copies seront imprimées à chaque vente
+              </div>
+            )}
+          </div>
+          {/* ── Logo ── */}
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🖼️ Logo du commerce</div>
             {shopLogo && (
