@@ -253,6 +253,25 @@ class OfflineStore {
   static set(shopId, type, data) { try { localStorage.setItem(getStoreKey(shopId, type), JSON.stringify(data || [])); } catch(e){} }
 }
 
+// ── Session persistante (reconnexion offline) ─────────────────────────────
+const SESSION_KEY = "pos_saved_session";
+const SessionStore = {
+  save: (session) => {
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ ...session, savedAt: Date.now() })); } catch(e) {}
+  },
+  load: () => {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      const s = JSON.parse(raw);
+      // Session valide max 30 jours
+      if (!s || !s.shopId || (Date.now() - (s.savedAt||0)) > 30 * 86400000) { SessionStore.clear(); return null; }
+      return s;
+    } catch(e) { return null; }
+  },
+  clear: () => { try { localStorage.removeItem(SESSION_KEY); } catch(e) {} },
+};
+
 
 // ── Helpers logo ──────────────────────────────────────────────────────────
 function resizeLogoToBase64(src, maxW, maxH) {
@@ -935,45 +954,288 @@ function SectionAbonnements({ T, shopId }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  FEAT 5 — CLÔTURE DE CAISSE
+//  MODULE REPAS — CA journalier + Total semaine
 // ══════════════════════════════════════════════════════════════════
-function SectionCloture({ T, shopId, sales, depenses }) {
+function SectionRepas({ T, sales, products }) {
+  const today = new Date().toISOString().slice(0,10);
+  const [catRepas, setCatRepas] = useState(() => localStorage.getItem("pos_cat_repas") || "Repas");
+  const [editCat, setEditCat] = useState(false);
+  const [catInput, setCatInput] = useState("");
+
+  const allCats = Array.from(new Set(products.map(p=>p.category).filter(Boolean)));
+
+  const isRepasItem = (item) => {
+    const prod = products.find(p=>p.id===item.productId);
+    return prod && prod.category && prod.category.toLowerCase() === catRepas.toLowerCase();
+  };
+
+  const getRepasDay = (date) => {
+    let ca=0, nbPlats=0;
+    sales.filter(s=>s.date===date&&!s.cancelled).forEach(sale=>{
+      (sale.items||[]).forEach(item=>{ if(isRepasItem(item)){ ca+=(item.amount||0)*(item.qty||1); nbPlats+=(item.qty||1); } });
+    });
+    return {ca,nbPlats};
+  };
+
+  const getWeek = () => {
+    const now=new Date(), dow=now.getDay();
+    const lundi=new Date(now); lundi.setDate(now.getDate()+(dow===0?-6:1-dow)); lundi.setHours(0,0,0,0);
+    return Array.from({length:7},(_,i)=>{ const d=new Date(lundi); d.setDate(lundi.getDate()+i); return d.toISOString().slice(0,10); });
+  };
+  const JOURS=["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"];
+  const semaineISO = getWeek();
+
+  const semaineData = semaineISO.map((date,idx)=>{
+    const {ca,nbPlats}=getRepasDay(date);
+    return {date,jour:JOURS[idx],isFuture:date>today,isToday:date===today,ca,nbPlats};
+  });
+  const totalSem = semaineData.filter(r=>!r.isFuture).reduce((acc,r)=>({ca:acc.ca+r.ca,nb:acc.nb+r.nbPlats}),{ca:0,nb:0});
+
+  const platStats={};
+  semaineISO.forEach(date=>{
+    sales.filter(s=>s.date===date&&!s.cancelled).forEach(sale=>{
+      (sale.items||[]).forEach(item=>{ if(isRepasItem(item)){ const k=item.label||"?"; if(!platStats[k]) platStats[k]={ca:0,qty:0}; platStats[k].ca+=(item.amount||0)*(item.qty||1); platStats[k].qty+=(item.qty||1); } });
+    });
+  });
+  const topPlats=Object.entries(platStats).sort((a,b)=>b[1].qty-a[1].qty).slice(0,5);
+  const todayRepas=getRepasDay(today);
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+        <div style={{fontSize:14,fontWeight:800}}>🍽️ Module Repas</div>
+        <button onClick={()=>{setEditCat(true);setCatInput(catRepas);}} style={{background:T.surface2,border:`1px solid ${T.border}`,borderRadius:10,padding:"5px 10px",fontSize:11,color:T.textMute}}>⚙️ Catégorie</button>
+      </div>
+
+      {editCat && (
+        <div style={{background:T.surface,borderRadius:14,padding:14,marginBottom:12,border:`1px solid ${T.accent}44`}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Catégorie "Repas" à suivre</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+            {allCats.map(c=>(
+              <button key={c} onClick={()=>setCatInput(c)} style={{background:catInput===c?T.accent:T.surface2,border:`1px solid ${catInput===c?T.accent:T.border}`,borderRadius:8,padding:"5px 10px",fontSize:11,color:catInput===c?T.bg:T.text,fontWeight:600}}>{c}</button>
+            ))}
+          </div>
+          <input value={catInput} onChange={e=>setCatInput(e.target.value)} placeholder="Ou saisir manuellement..."
+            style={{width:"100%",background:T.inputBg,border:`1px solid ${T.inputBd}`,borderRadius:10,padding:10,color:T.text,marginBottom:8}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setEditCat(false)} style={{flex:1,background:T.surface2,borderRadius:10,padding:10,fontWeight:600}}>Annuler</button>
+            <button onClick={()=>{const v=catInput.trim()||"Repas"; setCatRepas(v); localStorage.setItem("pos_cat_repas",v); setEditCat(false);}} style={{flex:1,background:T.accent,borderRadius:10,padding:10,fontWeight:700,color:T.bg}}>Valider</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{fontSize:10,color:T.textMute,marginBottom:10}}>Catégorie suivie : <span style={{color:T.accent,fontWeight:700}}>"{catRepas}"</span></div>
+
+      {/* Aujourd'hui */}
+      <div style={{background:T.surface,borderRadius:16,padding:14,marginBottom:12,border:`1px solid ${T.accent}33`}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>📆 Aujourd'hui — {today}</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>CA Repas</div><div style={{fontSize:20,fontWeight:800,color:T.green}}>{fmtPrice(todayRepas.ca)}</div></div>
+          <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Plats servis</div><div style={{fontSize:20,fontWeight:800,color:T.blue}}>{todayRepas.nbPlats}</div></div>
+        </div>
+        {todayRepas.ca===0&&<div style={{marginTop:8,fontSize:11,color:T.textMute,textAlign:"center"}}>Aucune vente "{catRepas}" aujourd'hui</div>}
+      </div>
+
+      {/* Semaine */}
+      <div style={{background:T.surface,borderRadius:16,padding:14,marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>📅 CA Repas — Semaine en cours</div>
+        {semaineData.map(r=>(
+          <div key={r.date} style={{marginBottom:5,borderRadius:10,padding:"8px 10px",background:r.isToday?T.accent+"18":r.isFuture?"transparent":"transparent",border:r.isToday?`1px solid ${T.accent}55`:`1px solid ${T.border}`,opacity:r.isFuture?0.38:1,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <span style={{fontSize:12,fontWeight:800,color:r.isToday?T.accent:T.text}}>{r.jour}</span>
+              {r.isToday&&<span style={{marginLeft:6,fontSize:8,background:T.accent,color:T.bg,borderRadius:4,padding:"1px 5px"}}>AUJ.</span>}
+            </div>
+            {!r.isFuture
+              ? <div style={{textAlign:"right"}}><div style={{fontSize:13,fontWeight:800,color:r.ca>0?T.green:T.textMute}}>{r.ca>0?fmtPrice(r.ca):"—"}</div>{r.nbPlats>0&&<div style={{fontSize:9,color:T.textMute}}>{r.nbPlats} plat(s)</div>}</div>
+              : <span style={{fontSize:11,color:T.textMute}}>—</span>}
+          </div>
+        ))}
+        <div style={{background:T.accent+"22",border:`2px solid ${T.accent}44`,borderRadius:12,padding:12,marginTop:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:12,fontWeight:800,color:T.accent}}>🏆 TOTAL SEMAINE</div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:20,fontWeight:800,color:T.green}}>{fmtPrice(totalSem.ca)}</div>
+            <div style={{fontSize:10,color:T.textMute}}>{totalSem.nb} plat(s)</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Top plats */}
+      {topPlats.length>0&&(
+        <div style={{background:T.surface,borderRadius:16,padding:14}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>🏅 Top plats — semaine</div>
+          {topPlats.map(([nom,s],i)=>(
+            <div key={nom} style={{display:"flex",alignItems:"center",gap:10,marginBottom:7,background:T.surface2,borderRadius:10,padding:"8px 10px"}}>
+              <span style={{fontSize:16,fontWeight:800,color:i===0?T.accent:T.textMute,minWidth:24}}>#{i+1}</span>
+              <div style={{flex:1}}><div style={{fontSize:12,fontWeight:700}}>{nom}</div><div style={{fontSize:10,color:T.textMute}}>{s.qty} portion(s)</div></div>
+              <span style={{fontSize:13,fontWeight:800,color:T.green}}>{fmtPrice(s.ca)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  FEAT 5 — CLÔTURE DES COMPTES (COMPTABLE) — protégée par PIN
+// ══════════════════════════════════════════════════════════════════
+function SectionCloture({ T, shopId, sales, depenses, comptablePin }) {
   const today = new Date().toISOString().slice(0,10);
   const KEY = `pos_cloture_${shopId}`;
+  const KEY_SEMAINE = `pos_cloture_semaine_${shopId}`;
   const [history, setHistory] = useState(() => { try { return JSON.parse(localStorage.getItem(KEY)||"[]"); } catch(e){ return []; } });
+  const [histSemaine, setHistSemaine] = useState(() => { try { return JSON.parse(localStorage.getItem(KEY_SEMAINE)||"[]"); } catch(e){ return []; } });
   const [fondCaisse, setFondCaisse] = useState("");
+  const [pinInput, setPinInput] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [pinError, setPinError] = useState(false);
+  const [viewMode, setViewMode] = useState("jour"); // "jour" | "semaine"
+
+  const PIN = comptablePin || "0000";
+
+  const tryUnlock = () => {
+    if(pinInput === PIN) { setUnlocked(true); setPinError(false); }
+    else { setPinError(true); setPinInput(""); setTimeout(()=>setPinError(false), 1500); }
+  };
+
+  // Calculs journaliers
   const todaySales = sales.filter(s=>s.date===today&&!s.cancelled);
   const caToday = todaySales.reduce((a,s)=>a+(s.total||0),0);
   const depToday = depenses.filter(d=>d.date===today).reduce((a,d)=>a+(d.montant||0),0);
   const alreadyClosed = history.find(h=>h.date===today);
+
   const cloturer = () => {
+    if(!fondCaisse) { return; }
     const fond=parseInt(fondCaisse)||0; const ecart=fond-caToday;
-    const updated=[...history,{date:today,caTheorique:caToday,fondDeclaré:fond,ecart,nbVentes:todaySales.length,depenses:depToday,closedAt:Date.now()}];
+    const updated=[...history,{date:today,caTheorique:caToday,fondDeclaré:fond,ecart,nbVentes:todaySales.length,depenses:depToday,net:caToday-depToday,closedAt:Date.now()}];
     setHistory(updated); localStorage.setItem(KEY, JSON.stringify(updated));
     triggerNotification("🔒 Caisse clôturée",`CA: ${fmtPrice(caToday)} | Écart: ${fmtPrice(ecart)}`);
   };
-  return (<div>
-    <div style={{fontSize:14,fontWeight:800,marginBottom:12}}>📅 Clôture de caisse</div>
-    <div style={{background:T.surface,borderRadius:16,padding:16,marginBottom:12}}>
-      <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>Récapitulatif du {today}</div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
-        <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>CA théorique</div><div style={{fontSize:18,fontWeight:800,color:T.green}}>{fmtPrice(caToday)}</div></div>
-        <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Ventes</div><div style={{fontSize:18,fontWeight:800,color:T.blue}}>{todaySales.length}</div></div>
-        <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Dépenses</div><div style={{fontSize:18,fontWeight:800,color:T.red}}>{fmtPrice(depToday)}</div></div>
-        <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Net</div><div style={{fontSize:18,fontWeight:800,color:T.accent}}>{fmtPrice(caToday-depToday)}</div></div>
-      </div>
-      {!alreadyClosed ? (<>
-        <input placeholder="Fond de caisse physique (F)" value={fondCaisse} onChange={e=>setFondCaisse(e.target.value.replace(/\D/g,""))} style={{width:"100%",background:T.inputBg,border:`1px solid ${T.inputBd}`,borderRadius:10,padding:10,color:T.text,marginBottom:8}}/>
-        {fondCaisse&&<div style={{background:Math.abs(parseInt(fondCaisse)-caToday)>1000?T.btnRed.bg:T.btnGreen.bg,borderRadius:8,padding:8,marginBottom:8,textAlign:"center",fontSize:12,fontWeight:700,color:Math.abs(parseInt(fondCaisse)-caToday)>1000?T.red:T.green}}>Écart: {fmtPrice(parseInt(fondCaisse)-caToday)}</div>}
-        <button onClick={cloturer} style={{width:"100%",background:T.accent,border:"none",borderRadius:12,padding:12,fontWeight:700,color:T.bg}}>🔒 Clôturer la caisse</button>
-      </>) : <div style={{background:T.btnGreen.bg,borderRadius:12,padding:12,textAlign:"center",color:T.green,fontWeight:700}}>✅ Caisse clôturée aujourd'hui</div>}
+
+  // Calculs hebdomadaires
+  const getWeek = () => {
+    const now = new Date(); const dow = now.getDay();
+    const diffToMon = (dow===0?-6:1-dow);
+    const lundi = new Date(now); lundi.setDate(now.getDate()+diffToMon); lundi.setHours(0,0,0,0);
+    return Array.from({length:7},(_,i)=>{ const d=new Date(lundi); d.setDate(lundi.getDate()+i); return d.toISOString().slice(0,10); });
+  };
+  const JOURS = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"];
+  const semaineISO = getWeek();
+  const semaineData = semaineISO.map((date,idx)=>{
+    const isFuture=date>today; const isToday=date===today;
+    const ventes=sales.filter(s=>s.date===date&&!s.cancelled);
+    const ca=ventes.reduce((a,s)=>a+(s.total||0),0);
+    const dep=depenses.filter(d=>d.date===date).reduce((a,d)=>a+(d.montant||0),0);
+    const cloture=history.find(h=>h.date===date);
+    return {date,jour:JOURS[idx],isFuture,isToday,ca,dep,net:ca-dep,nbVentes:ventes.length,cloture};
+  });
+  const totalSem = semaineData.filter(r=>!r.isFuture).reduce((acc,r)=>({ca:acc.ca+r.ca,dep:acc.dep+r.dep,net:acc.net+r.net,nb:acc.nb+r.nbVentes}),{ca:0,dep:0,net:0,nb:0});
+  const semaineDejaCloturee = histSemaine.find(s=>s.debut===semaineISO[0]);
+
+  const cloturerSemaine = () => {
+    const recap = {debut:semaineISO[0],fin:semaineISO[6],closedAt:Date.now(),...totalSem,jours:semaineData.filter(r=>!r.isFuture)};
+    const updated=[...histSemaine, recap];
+    setHistSemaine(updated); localStorage.setItem(KEY_SEMAINE, JSON.stringify(updated));
+    triggerNotification("📅 Semaine clôturée",`CA: ${fmtPrice(totalSem.ca)} | Net: ${fmtPrice(totalSem.net)}`);
+  };
+
+  // ── Mur PIN ──────────────────────────────────────────────────
+  if(!unlocked) return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32,gap:16}}>
+      <div style={{fontSize:48}}>🔒</div>
+      <div style={{fontSize:16,fontWeight:800,color:T.text,textAlign:"center"}}>Accès Comptable</div>
+      <div style={{fontSize:12,color:T.textMute,textAlign:"center"}}>Entrez le PIN comptable pour accéder aux clôtures</div>
+      <input type="password" maxLength={6} value={pinInput} onChange={e=>setPinInput(e.target.value.replace(/\D/g,"").slice(0,6))}
+        placeholder="• • • •"
+        style={{width:180,background:T.inputBg,border:`2px solid ${pinError?T.red:T.inputBd}`,borderRadius:14,padding:"14px 0",color:T.text,textAlign:"center",fontSize:22,letterSpacing:10,animation:pinError?"shake 0.4s":"none"}}
+      />
+      {pinError && <div style={{color:T.red,fontSize:12,fontWeight:700}}>❌ PIN incorrect</div>}
+      <button onClick={tryUnlock} style={{background:T.accent,border:"none",borderRadius:14,padding:"12px 32px",fontWeight:800,color:T.bg,fontSize:14}}>Valider</button>
     </div>
-    <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Historique</div>
-    {[...history].reverse().slice(0,10).map(h=><div key={h.date} style={{background:T.surface,borderRadius:10,padding:10,marginBottom:6}}>
-      <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700}}>{h.date}</span><span style={{color:Math.abs(h.ecart)>1000?T.red:T.green,fontWeight:700}}>{fmtPrice(h.caTheorique)}</span></div>
-      <div style={{fontSize:10,color:T.textMute}}>{h.nbVentes} ventes · Écart: <span style={{color:h.ecart===0?T.green:T.orange}}>{fmtPrice(h.ecart)}</span></div>
-    </div>)}
-  </div>);
+  );
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+        <div style={{fontSize:14,fontWeight:800}}>📅 Clôture des comptes</div>
+        <button onClick={()=>setUnlocked(false)} style={{background:T.surface2,border:"none",borderRadius:10,padding:"5px 10px",fontSize:11,color:T.textMute}}>🔒 Verrouiller</button>
+      </div>
+
+      {/* Tabs Jour / Semaine */}
+      <div style={{display:"flex",gap:6,marginBottom:12,background:T.surface2,borderRadius:12,padding:4}}>
+        {[["jour","📆 Journée"],["semaine","📅 Semaine"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setViewMode(k)} style={{flex:1,background:viewMode===k?T.accent:"transparent",border:"none",borderRadius:9,padding:"8px 0",fontWeight:700,color:viewMode===k?T.bg:T.textMute,fontSize:12}}>{l}</button>
+        ))}
+      </div>
+
+      {/* ── VUE JOURNALIÈRE ── */}
+      {viewMode==="jour" && (<>
+        <div style={{background:T.surface,borderRadius:16,padding:16,marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>Récapitulatif du {today}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>CA théorique</div><div style={{fontSize:18,fontWeight:800,color:T.green}}>{fmtPrice(caToday)}</div></div>
+            <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Ventes</div><div style={{fontSize:18,fontWeight:800,color:T.blue}}>{todaySales.length}</div></div>
+            <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Dépenses</div><div style={{fontSize:18,fontWeight:800,color:T.red}}>{fmtPrice(depToday)}</div></div>
+            <div style={{background:T.surface2,borderRadius:10,padding:10}}><div style={{fontSize:9,color:T.textMute}}>Net</div><div style={{fontSize:18,fontWeight:800,color:T.accent}}>{fmtPrice(caToday-depToday)}</div></div>
+          </div>
+          {!alreadyClosed ? (<>
+            <div style={{fontSize:11,color:T.textMute,marginBottom:6}}>Fond de caisse physique compté</div>
+            <input placeholder="Montant en F CFA" value={fondCaisse} onChange={e=>setFondCaisse(e.target.value.replace(/\D/g,""))}
+              style={{width:"100%",background:T.inputBg,border:`1px solid ${T.inputBd}`,borderRadius:10,padding:10,color:T.text,marginBottom:8}}/>
+            {fondCaisse&&<div style={{background:Math.abs(parseInt(fondCaisse)-caToday)>1000?T.btnRed.bg:T.btnGreen.bg,borderRadius:8,padding:8,marginBottom:8,textAlign:"center",fontSize:13,fontWeight:800,color:Math.abs(parseInt(fondCaisse)-caToday)>1000?T.red:T.green}}>
+              {Math.abs(parseInt(fondCaisse)-caToday)===0?"✅ Caisse juste":parseInt(fondCaisse)>caToday?"⚠️ Excédent":"❌ Manquant"} : {fmtPrice(Math.abs(parseInt(fondCaisse)-caToday))}
+            </div>}
+            <button onClick={cloturer} disabled={!fondCaisse} style={{width:"100%",background:fondCaisse?T.accent:T.surface2,border:"none",borderRadius:12,padding:12,fontWeight:700,color:fondCaisse?T.bg:T.textMute,opacity:fondCaisse?1:0.6}}>🔒 Clôturer la journée</button>
+          </>) : <div style={{background:T.btnGreen.bg,borderRadius:12,padding:12,textAlign:"center",color:T.green,fontWeight:700}}>✅ Journée clôturée — {fmtPrice(alreadyClosed.caTheorique)}</div>}
+        </div>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Historique journées</div>
+        {[...history].reverse().slice(0,10).map(h=><div key={h.date} style={{background:T.surface,borderRadius:10,padding:10,marginBottom:6}}>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700}}>{h.date}</span><span style={{color:T.green,fontWeight:700}}>{fmtPrice(h.caTheorique)}</span></div>
+          <div style={{fontSize:10,color:T.textMute}}>{h.nbVentes} ventes · Net: {fmtPrice(h.net||0)} · Écart: <span style={{color:h.ecart===0?T.green:Math.abs(h.ecart)>1000?T.red:T.orange,fontWeight:700}}>{fmtPrice(h.ecart)}</span></div>
+        </div>)}
+      </>)}
+
+      {/* ── VUE HEBDOMADAIRE ── */}
+      {viewMode==="semaine" && (<>
+        <div style={{background:T.surface,borderRadius:16,padding:14,marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>Semaine du {semaineISO[0]} au {semaineISO[5]}</div>
+          {semaineData.map(r=>(
+            <div key={r.date} style={{marginBottom:6,borderRadius:10,padding:"9px 10px",background:r.isToday?T.accent+"18":r.isFuture?T.surface2+"88":"transparent",border:r.isToday?`1px solid ${T.accent}55`:`1px solid ${T.border}`,opacity:r.isFuture?0.4:1}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <span style={{fontSize:12,fontWeight:800,color:r.isToday?T.accent:T.text}}>{r.jour}</span>
+                  {r.isToday&&<span style={{marginLeft:6,fontSize:8,background:T.accent,color:T.bg,borderRadius:5,padding:"1px 5px"}}>AUJOURD'HUI</span>}
+                  {r.cloture&&<span style={{marginLeft:6,fontSize:8,background:T.btnGreen.bg,color:T.green,borderRadius:5,padding:"1px 5px"}}>✅ CLÔTURÉ</span>}
+                </div>
+                {!r.isFuture&&<span style={{fontSize:13,fontWeight:800,color:T.green}}>{fmtPrice(r.ca)}</span>}
+              </div>
+              {!r.isFuture&&<div style={{fontSize:10,color:T.textMute,marginTop:3}}>{r.nbVentes} vente(s) · Dép: {fmtPrice(r.dep)} · Net: <span style={{color:r.net>=0?T.accent:T.red,fontWeight:700}}>{fmtPrice(r.net)}</span></div>}
+            </div>
+          ))}
+          {/* Total semaine */}
+          <div style={{background:T.accent+"18",border:`1px solid ${T.accent}55`,borderRadius:12,padding:12,marginTop:10}}>
+            <div style={{fontSize:11,fontWeight:800,marginBottom:8,color:T.accent}}>📊 TOTAL SEMAINE</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              <div style={{background:T.surface2,borderRadius:8,padding:8}}><div style={{fontSize:9,color:T.textMute}}>CA total</div><div style={{fontSize:16,fontWeight:800,color:T.green}}>{fmtPrice(totalSem.ca)}</div></div>
+              <div style={{background:T.surface2,borderRadius:8,padding:8}}><div style={{fontSize:9,color:T.textMute}}>Ventes</div><div style={{fontSize:16,fontWeight:800,color:T.blue}}>{totalSem.nb}</div></div>
+              <div style={{background:T.surface2,borderRadius:8,padding:8}}><div style={{fontSize:9,color:T.textMute}}>Dépenses</div><div style={{fontSize:16,fontWeight:800,color:T.red}}>{fmtPrice(totalSem.dep)}</div></div>
+              <div style={{background:T.surface2,borderRadius:8,padding:8}}><div style={{fontSize:9,color:T.textMute}}>Net</div><div style={{fontSize:16,fontWeight:800,color:totalSem.net>=0?T.accent:T.red}}>{fmtPrice(totalSem.net)}</div></div>
+            </div>
+          </div>
+          {!semaineDejaCloturee ? (
+            <button onClick={cloturerSemaine} style={{width:"100%",background:T.accent,border:"none",borderRadius:12,padding:12,fontWeight:800,color:T.bg,marginTop:10,fontSize:13}}>📅 Arrêter les comptes de la semaine</button>
+          ) : (
+            <div style={{background:T.btnGreen.bg,borderRadius:12,padding:12,textAlign:"center",color:T.green,fontWeight:700,marginTop:10}}>✅ Semaine clôturée le {new Date(semaineDejaCloturee.closedAt).toLocaleDateString("fr-FR")}</div>
+          )}
+        </div>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Historique semaines</div>
+        {[...histSemaine].reverse().slice(0,6).map(s=><div key={s.debut} style={{background:T.surface,borderRadius:10,padding:10,marginBottom:6}}>
+          <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:700,fontSize:12}}>Sem. {s.debut}</span><span style={{color:T.green,fontWeight:800}}>{fmtPrice(s.ca)}</span></div>
+          <div style={{fontSize:10,color:T.textMute}}>{s.nb} ventes · Net: <span style={{color:s.net>=0?T.accent:T.red,fontWeight:700}}>{fmtPrice(s.net)}</span> · Clôt. {new Date(s.closedAt).toLocaleDateString("fr-FR")}</div>
+        </div>)}
+      </>)}
+    </div>
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1636,7 +1898,7 @@ const COL_80 = 42;
 const COL_57 = 32;
 const COL = 42; // default 80mm
 
-async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo) {
+async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo, ticketFooter) {
   const C = col || COL_80;
   const is80 = C >= COL_80;
   const buf = [];
@@ -1736,8 +1998,9 @@ async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, 
   // ── Pied de ticket ──────────────────────────────────────────
   emptyLine();
   alignCenter();
-  line("Merci pour votre confiance !");
-  line("--- Digitale Solution ---");
+  // Pied personnalisable — jusqu'à 3 lignes séparées par \n
+  const piedLines = (ticketFooter || "Merci pour votre confiance !\n--- Digitale Solution ---").split("\n").map(l=>l.trim()).filter(Boolean);
+  piedLines.forEach(l => line(l.slice(0, C)));
 
   // ── Avance papier + coupe ───────────────────────────────────
   push([ESC, 0x64, 0x05]);      // Avancer 5 lignes
@@ -1746,12 +2009,11 @@ async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, 
   return new Uint8Array(buf);
 }
 
-async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies) {
+async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter) {
   if (!printer.connected) throw new Error("Imprimante non connectée");
   const col = ticketFormat === "57mm" ? COL_57 : COL_80;
   const copies = Math.max(1, parseInt(nbCopies) || 1);
-  // Construire le ticket une fois, l'envoyer N fois
-  const ticket = await buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo);
+  const ticket = await buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo, ticketFooter);
   for (let i = 0; i < copies; i++) {
     await printer.print(ticket);
     // Petite pause entre copies pour ne pas saturer le buffer BLE
@@ -1760,9 +2022,10 @@ async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticket
   return true;
 }
 
-function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies) {
+function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter) {
   const copies = Math.max(1, parseInt(nbCopies) || 1);
   const w = ticketFormat === "57mm" ? "58mm" : "80mm";
+  const piedLines = (ticketFooter || "Merci pour votre confiance !\n--- Digitale Solution ---").split("\n").map(l=>l.trim()).filter(Boolean);
   const buildHtml = () => {
     let html = `<html><head><meta charset="utf-8"><title>Ticket</title><style>
       @page{size:${w} auto;margin:4mm}
@@ -1788,7 +2051,7 @@ function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketForm
       if(qty>1) html += `<div style="font-size:10px;margin-left:8px;color:#555">@ ${fmtPrice(it.amount)}</div>`;
     });
     html += `<hr class="sep"><div class="total-row"><span>TOTAL</span><span>${fmtPrice(total)}</span></div><hr class="sep">`;
-    html += `<div class="footer">Merci pour votre confiance !<br>--- Digitale Solution ---</div></body></html>`;
+    html += `<div class="footer">${piedLines.map(l=>`<div>${l}</div>`).join("")}</div></body></html>`;
     return html;
   };
   // Pour les copies : ouvrir une seule fenêtre et imprimer N fois via CSS @page copies
@@ -2108,7 +2371,14 @@ function App() {
     mq.addEventListener ? mq.addEventListener("change", handler) : mq.addListener(handler);
     return () => mq.removeEventListener ? mq.removeEventListener("change", handler) : mq.removeListener(handler);
   }, [themeName]);
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState(() => {
+    // Restauration depuis session locale (offline OU rechargement de page)
+    const saved = SessionStore.load();
+    if (saved) return saved;
+    return null;
+  });
+  const [sessionRestored, setSessionRestored] = useState(() => !!SessionStore.load());
+  const [reAuthPending, setReAuthPending] = useState(false);
   const [authMode, setAuthMode] = useState("login");
   const [authShopName, setAuthShopName] = useState("");
   const [authOwnerName, setAuthOwnerName] = useState("");
@@ -2187,17 +2457,60 @@ function App() {
       const data = doc.data();
       if(btoa(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
       if(data.active === false) throw new Error("Compte désactivé");
-      setSession({ 
+      const newSession = { 
         shopId: doc.id, shopName: data.shopName, shopPhone: data.phone || "", 
         whatsapp: data.whatsapp, ownerName: data.ownerName, plan: data.plan || "mensuel", 
         subscriptionEnd: data.subscriptionEnd, adminPin: data.adminPin || btoa("0000"), isDev: false,
         shopLogo: data.logoBase64 || null
-      });
+      };
+      SessionStore.save(newSession);
+      setSession(newSession);
+      setSessionRestored(false);
     } catch(e) { setAuthError(e.message); }
     setAuthLoading(false);
   };
 
-  const logout = () => setSession(null);
+  const logout = () => { SessionStore.clear(); setSession(null); setSessionRestored(false); };
+
+  // ── Reconnexion silencieuse au retour du réseau ───────────────────────────
+  useEffect(() => {
+    if (!sessionRestored || !session) return;
+    let active = true;
+
+    const tryReAuth = async () => {
+      if (!navigator.onLine || !db) return;
+      setReAuthPending(true);
+      try {
+        const doc = await db.collection("shops").doc(session.shopId).get();
+        if (!active) return;
+        if (doc.exists) {
+          const data = doc.data();
+          if (data.active === false) { logout(); return; }
+          // Met à jour la session avec les données fraîches
+          const refreshed = {
+            ...session,
+            shopName: data.shopName || session.shopName,
+            adminPin: data.adminPin || session.adminPin,
+            subscriptionEnd: data.subscriptionEnd || session.subscriptionEnd,
+            plan: data.plan || session.plan,
+            shopLogo: data.logoBase64 || session.shopLogo,
+          };
+          SessionStore.save(refreshed);
+          setSession(refreshed);
+          setSessionRestored(false);
+        }
+      } catch(e) { /* réseau instable, on reste en mode offline */ }
+      if (active) setReAuthPending(false);
+    };
+
+    // Essai immédiat si en ligne
+    if (navigator.onLine) { tryReAuth(); }
+
+    // Puis écoute le retour de connexion
+    const onOnline = () => tryReAuth();
+    window.addEventListener("online", onOnline);
+    return () => { active = false; window.removeEventListener("online", onOnline); };
+  }, [sessionRestored]);
 
   if (devMode) {
     return (
@@ -2249,13 +2562,13 @@ function App() {
   }
 
   if(session.isDev) return <DevDashboard T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} />;
-  return <MainApp session={session} T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} />;
+  return <MainApp session={session} T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} sessionRestored={sessionRestored} reAuthPending={reAuthPending} />;
 }
 
 // ══════════════════════════════════════════════════════════════════
 //  MAIN APP AVEC BANDE D'ABONNEMENT
 // ══════════════════════════════════════════════════════════════════
-function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
+function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessionRestored, reAuthPending }) {
   const [products, setProducts] = useState(() => OfflineStore.get(session.shopId, "products") || []);
   const [sales, setSales] = useState(() => OfflineStore.get(session.shopId, "sales") || []);
   const [stockMovements, setStockMovements] = useState(() => OfflineStore.get(session.shopId, "stock_movements") || []);
@@ -2265,6 +2578,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
   const [mode, setMode] = useState("CAISSE");
   const [items, setItems] = useState([]);
   const [ownerMode, setOwnerMode] = useState(false);
+  const [gerantMode, setGerantMode] = useState(false);
   const [pinModal, setPinModal] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState(false);
@@ -2272,6 +2586,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
   const [useBLE, setUseBLE] = useState(true);
   const [ticketFormat, setTicketFormat] = useState(() => localStorage.getItem("pos_ticket_fmt") || "80mm");
   const [nbCopies, setNbCopies] = useState(() => parseInt(localStorage.getItem("pos_ticket_copies") || "1"));
+  const [ticketFooter, setTicketFooter] = useState(() => localStorage.getItem("pos_ticket_footer") || "Merci pour votre confiance !\n--- Digitale Solution ---");
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [shopLogo, setShopLogo] = useState(session.shopLogo || null);
   const [caissDash, setCaissDash] = useState(false);
@@ -2310,15 +2625,15 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
     if(print) {
       try {
         if (useBLE && printer.connected) {
-          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies)
-            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies));
+          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter)
+            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter));
           flashMsg(`✅ Vente + impression BLE ${ticketFormat}${nbCopies>1?" x"+nbCopies+" copies":""}`);
         } else {
-          printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies);
+          printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter);
           flashMsg(`✅ Vente + impression navigateur${nbCopies>1?" x"+nbCopies+" copies":""}`);
         }
       } catch(e) {
-        printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies);
+        printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter);
         flashMsg("✅ Vente (fallback)");
       }
     } else {
@@ -2426,6 +2741,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
       setPinModal(false);
       setPinInput("");
       setOwnerMode(true);
+      setGerantMode(false);
     } else {
       setPinError(true);
       setPinShake(true);
@@ -2435,6 +2751,8 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
 
   const enterOwnerMode = () => { setPinModal(true); setPinInput(""); setPinError(false); };
   const exitOwnerMode = () => { setOwnerMode(false); };
+  const enterGerantMode = () => { setGerantMode(true); setOwnerMode(false); };
+  const exitGerantMode = () => { setGerantMode(false); };
 
   const updateAdminPin = async (newPin) => {
     const newEncoded = btoa(newPin);
@@ -2449,6 +2767,33 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
       <SubscriptionBanner T={T} shopId={session.shopId} />
       {/* INDICATEUR HORS-LIGNE / FILE D'ATTENTE SYNC */}
       <OfflineSyncBanner T={T} shopId={session.shopId} />
+      {/* BANNIÈRE SESSION OFFLINE RESTAURÉE */}
+      {(sessionRestored || reAuthPending) && (
+        <div style={{
+          background: reAuthPending ? "#0a1a2a" : "#1a0f00",
+          borderBottom: `1px solid ${reAuthPending ? "#1e3a5a" : "#3a2000"}`,
+          padding: "7px 14px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          fontSize: 11, flexShrink: 0, gap: 8
+        }}>
+          <div style={{display:"flex", alignItems:"center", gap:8}}>
+            {reAuthPending
+              ? <><span style={{fontSize:13}}>🔄</span><span style={{color:"#60a5fa"}}>Reconnexion en cours… données locales actives</span></>
+              : <><span style={{fontSize:13}}>📴</span><span style={{color:"#fb923c"}}>Mode hors ligne — session restaurée localement · en attente du réseau</span></>
+            }
+          </div>
+          {!reAuthPending && (
+            <div style={{display:"flex", gap:6}}>
+              <span style={{background:"#fb923c22", color:"#fb923c", borderRadius:8, padding:"2px 8px", fontSize:10, fontWeight:700}}>
+                {navigator.onLine ? "🟡 Sync…" : "🔴 Offline"}
+              </span>
+            </div>
+          )}
+          {reAuthPending && (
+            <div style={{width:14, height:14, border:"2px solid #60a5fa44", borderTopColor:"#60a5fa", borderRadius:"50%", animation:"spin .8s linear infinite", flexShrink:0}} />
+          )}
+        </div>
+      )}
       
       {pinModal && (
         <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.95)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2000}}>
@@ -2483,7 +2828,12 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
             <button className={`theme-btn${themeName==="dark"?"  active":""}`} onClick={()=>setThemeName("dark")}  title="Mode sombre"           style={{background:themeName==="dark"?T.accent:"transparent",  color:themeName==="dark"?T.bg:T.textSub}}>🌙</button>
             <button className={`theme-btn${themeName==="neon"?"  active":""}`} onClick={()=>setThemeName("neon")}  title="Néon"                  style={{background:themeName==="neon"?T.accent:"transparent",  color:themeName==="neon"?T.bg:T.textSub}}>⚡</button>
           </div>
-          <button className="hdr-btn" onClick={()=>setMode("CAISSE")} style={{background:mode==="CAISSE"?T.accent:"transparent", border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:mode==="CAISSE"?T.bg:T.textSub}}>🛒<span className="hdr-text-label"> Caisse</span></button>
+          <button className="hdr-btn" onClick={()=>{ setMode("CAISSE"); setOwnerMode(false); setGerantMode(false); }} style={{background:mode==="CAISSE"&&!ownerMode&&!gerantMode?T.accent:"transparent", border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:mode==="CAISSE"&&!ownerMode&&!gerantMode?T.bg:T.textSub}}>🛒<span className="hdr-text-label"> Caisse</span></button>
+          {!gerantMode ? (
+            <button className="hdr-btn" onClick={enterGerantMode} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.green}}>📋<span className="hdr-text-label"> Gérant</span></button>
+          ) : (
+            <button className="hdr-btn" onClick={exitGerantMode} style={{background:T.btnRed.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.red}}>✕<span className="hdr-text-label"> Gérant</span></button>
+          )}
           {!ownerMode ? (
             <button className="hdr-btn" onClick={enterOwnerMode} style={{background:T.btnBlue.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.blue}}>👑<span className="hdr-text-label"> Admin</span></button>
           ) : (
@@ -2591,7 +2941,10 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg }) {
       )}
       
       {ownerMode && (
-        <OwnerContent T={T} shopName={session.shopName} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} />
+        <OwnerContent T={T} shopName={session.shopName} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} ticketFooter={ticketFooter} setTicketFooter={setTicketFooter} />
+      )}
+      {gerantMode && !ownerMode && (
+        <GerantContent T={T} products={products} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} shopName={session.shopName} />
       )}
     </div>
   );
@@ -3945,7 +4298,189 @@ function SectionVentes({ T, sales, hasBeneficeData }) {
   );
 }
 
-function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale, ticketFormat, setTicketFormat, nbCopies, setNbCopies }) {
+// ══════════════════════════════════════════════════════════════════
+//  GÉRANT CONTENT — Stats + Stock (sans PIN)
+// ══════════════════════════════════════════════════════════════════
+function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName }) {
+  const [tab, setTab] = useState("stats");
+
+  // ── Stats du jour ──────────────────────────────────────────────
+  const today = new Date().toISOString().slice(0,10);
+  const todaySales = (sales||[]).filter(s=>s.date===today);
+  const caToday = todaySales.filter(s=>!s.cancelled).reduce((a,b)=>a+(b.total||0),0);
+  const lowStock = products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5).length;
+  const beneficeToday = todaySales.filter(s=>!s.cancelled).reduce((tot,sale)=>tot+(sale.items||[]).reduce((sub,item)=>{ if(!item.productId)return sub; const prod=products.find(p=>p.id===item.productId); if(!prod||!prod.prixAchat)return sub; return sub+(item.amount-prod.prixAchat)*(item.qty||1); },0),0);
+  const hasBeneficeData = products.some(p=>p.prixAchat>0);
+
+  // Valorisation stock
+  const prodsAvecStock = products.filter(p=>p.active!==false&&p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock>0);
+  const valeurAchat = prodsAvecStock.reduce((a,p)=>a+((p.prixAchat||0)*p.stock),0);
+  const valeurVente = prodsAvecStock.reduce((a,p)=>a+((p.price||0)*p.stock),0);
+
+  // 7 derniers jours
+  const last7 = Array.from({length:7},(_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(6-i)); return d.toISOString().slice(0,10); });
+  const chartData = last7.map(date=>({ label: date.slice(5).replace("-","/"), v: (sales||[]).filter(s=>s.date===date&&!s.cancelled).reduce((a,b)=>a+(b.total||0),0) }));
+  const maxV = Math.max(...chartData.map(c=>c.v), 1);
+
+  // Top 5 produits
+  const prodCount = {};
+  (sales||[]).filter(s=>!s.cancelled).forEach(s=>(s.items||[]).forEach(it=>{ if(it.label){ prodCount[it.label]=(prodCount[it.label]||0)+(it.qty||1); } }));
+  const top5 = Object.entries(prodCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
+
+  const TABS = [["stats","📊 Stats"],["stock","📋 Stock"],["reappro","🔄 Réappro"],["valorisation","💰 Valeur stock"]];
+
+  return (
+    <div style={{flex:1, overflowY:"auto", padding:12}}>
+      {/* Badge mode gérant */}
+      <div style={{background:T.btnGreen.bg, border:`1px solid ${T.green}44`, borderRadius:12, padding:"8px 14px", marginBottom:12, display:"flex", alignItems:"center", gap:8}}>
+        <span style={{fontSize:16}}>📋</span>
+        <div>
+          <div style={{fontWeight:700, fontSize:13, color:T.green}}>Mode Gérant</div>
+          <div style={{fontSize:10, color:T.textMute}}>Stats & gestion de stock — accès sans PIN</div>
+        </div>
+      </div>
+
+      {/* Onglets */}
+      <div style={{display:"flex", gap:5, marginBottom:14, flexWrap:"wrap"}}>
+        {TABS.map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?T.green:T.surface, borderRadius:12, padding:"7px 12px", flexShrink:0, fontSize:11, fontWeight:600, color:tab===k?T.bg:T.text}}>{l}</button>
+        ))}
+      </div>
+
+      {/* ── STATS ── */}
+      {tab==="stats" && (
+        <div>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, marginBottom:12}}>
+            <div style={{background:T.surface, borderRadius:16, padding:14}}>
+              <div style={{fontSize:11, color:T.textMute}}>CA Aujourd'hui</div>
+              <div style={{fontSize:24, fontWeight:800, color:T.green}}>{fmtPrice(caToday)}</div>
+            </div>
+            <div style={{background:T.surface, borderRadius:16, padding:14}}>
+              <div style={{fontSize:11, color:T.textMute}}>Ventes</div>
+              <div style={{fontSize:24, fontWeight:800, color:T.blue}}>{todaySales.filter(s=>!s.cancelled).length}</div>
+            </div>
+            <div style={{background:T.surface, borderRadius:16, padding:14}}>
+              <div style={{fontSize:11, color:T.textMute}}>Annulations</div>
+              <div style={{fontSize:24, fontWeight:800, color:T.red}}>{todaySales.filter(s=>s.cancelled).length}</div>
+            </div>
+            <div style={{background:T.surface, borderRadius:16, padding:14}}>
+              <div style={{fontSize:11, color:T.textMute}}>Stock bas</div>
+              <div style={{fontSize:24, fontWeight:800, color:T.orange}}>{lowStock}</div>
+            </div>
+            {hasBeneficeData && (
+              <div style={{background:T.surface, borderRadius:16, padding:14, gridColumn:"span 2", border:`1px solid ${T.accent}44`}}>
+                <div style={{fontSize:11, color:T.textMute}}>💰 Marge brute journalière</div>
+                <div style={{fontSize:26, fontWeight:800, color:beneficeToday>=0?T.accent:T.red}}>{fmtPrice(beneficeToday)}</div>
+              </div>
+            )}
+          </div>
+
+          {/* Graphique 7 jours */}
+          <div style={{background:T.surface, borderRadius:14, padding:12, marginBottom:12}}>
+            <div style={{fontSize:11, fontWeight:700, marginBottom:8}}>📈 CA — 7 derniers jours</div>
+            <div style={{display:"flex", alignItems:"flex-end", gap:5, height:72}}>
+              {chartData.map((c,i)=>{
+                const h = Math.max(c.v>0?4:1, Math.round((c.v/maxV)*60));
+                const isToday = last7[i]===today;
+                return (
+                  <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2}}>
+                    <div style={{fontSize:7, color:T.textMute}}>{c.v>0?Math.round(c.v/1000)+"k":""}</div>
+                    <div style={{width:"100%", height:h, background:isToday?T.green:T.blue+"88", borderRadius:"3px 3px 0 0"}}/>
+                    <div style={{fontSize:7, color:isToday?T.green:T.textMute, fontWeight:isToday?700:400}}>{c.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Top 5 */}
+          {top5.length>0 && (
+            <div style={{background:T.surface, borderRadius:14, padding:12}}>
+              <div style={{fontSize:11, fontWeight:700, marginBottom:8}}>🏆 Top produits</div>
+              {top5.map(([label, count], i)=>(
+                <div key={label} style={{display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:i<top5.length-1?`1px solid ${T.border}`:"none"}}>
+                  <span style={{fontSize:12}}>{i+1}. {label}</span>
+                  <span style={{fontSize:12, fontWeight:700, color:T.accent}}>{count} vente{count>1?"s":""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── STOCK ── */}
+      {tab==="stock" && (
+        <div>
+          <div style={{marginBottom:16}}>
+            <div style={{fontSize:12, fontWeight:600, marginBottom:8}}>📦 Niveaux de stock</div>
+            {products.filter(p=>p.active!==false).map(p=>(
+              <div key={p.id} style={{background:T.surface, borderRadius:12, padding:12, marginBottom:8}}>
+                <div style={{display:"flex", justifyContent:"space-between"}}><span style={{fontWeight:600}}>{p.name}</span><span style={{color:T.textMute, fontSize:12}}>{fmtPrice(p.price)}</span></div>
+                <div style={{marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                  <span style={{fontSize:12, color:p.stock===undefined||p.stock===null||p.stock===-1?T.textMute:(p.stock<=5?T.red:p.stock<=10?T.orange:T.green)}}>
+                    {p.stock===undefined||p.stock===null||p.stock===-1?"♾️ Illimité":`Stock: ${p.stock}`}
+                  </span>
+                  {p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&(
+                    <button onClick={()=>{const q=prompt("Quantité (positif=ajout, négatif=retrait):"); if(q){const n=parseInt(q); if(n!==0) updateStock(p.id, n, n>0?"entree":"sortie", "Ajustement gérant");}}} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"4px 10px", fontSize:10, color:T.green}}>Ajuster</button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{fontSize:12, fontWeight:600, marginBottom:8}}>📋 Mouvements récents</div>
+            {stockMovements.slice(0,15).map(m=>(
+              <div key={m.id} style={{background:T.surface2, borderRadius:8, padding:8, marginBottom:6, fontSize:11}}>
+                <div style={{display:"flex", justifyContent:"space-between"}}><span>{m.productName}</span><span style={{color:m.type==="entree"?T.green:T.red}}>{m.type==="entree"?`+${m.quantity}`:`-${Math.abs(m.quantity)}`}</span></div>
+                <div style={{fontSize:9, color:T.textMute}}>{m.reason} · {new Date(m.timestamp).toLocaleTimeString()}</div>
+              </div>
+            ))}
+            {stockMovements.length===0 && <div style={{textAlign:"center", padding:24, color:T.textMute, fontSize:11}}>Aucun mouvement</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ── RÉAPPRO ── */}
+      {tab==="reappro" && (
+        <div>
+          <div style={{background:T.surface, borderRadius:16, padding:14, marginBottom:12}}>
+            <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>🔄 Produits à réapprovisionner</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Stock ≤ 5 unités</div>
+            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5).length===0
+              ? <div style={{color:T.green, fontSize:12}}>✅ Tous les stocks sont OK</div>
+              : products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5).map(p=>(
+                  <div key={p.id} style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                    <div>
+                      <div style={{fontWeight:600}}>{p.name}</div>
+                      <div style={{fontSize:11, color:p.stock<=0?T.red:T.orange}}>Stock actuel: <strong>{p.stock}</strong></div>
+                    </div>
+                    <button onClick={()=>{const q=prompt(`Ajouter combien à ${p.name} ?`); if(q&&parseInt(q)>0) updateStock(p.id, parseInt(q), "entree", "Réappro gérant");}} style={{background:T.green, border:"none", borderRadius:8, padding:"6px 12px", fontWeight:600, color:T.bg, fontSize:12}}>+ Ajouter</button>
+                  </div>
+                ))
+            }
+          </div>
+          <div style={{background:T.surface, borderRadius:16, padding:14}}>
+            <div style={{fontSize:13, fontWeight:700, marginBottom:10}}>📦 Réapprovisionner n'importe quel produit</div>
+            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1).map(p=>(
+              <div key={p.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:`1px solid ${T.border}`}}>
+                <span style={{fontSize:12}}>{p.name} <span style={{color:T.textMute}}>({p.stock})</span></span>
+                <button onClick={()=>{const q=prompt(`Quantité à ajouter pour ${p.name} ?`); if(q&&parseInt(q)>0) updateStock(p.id, parseInt(q), "entree", "Réappro gérant");}} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"3px 10px", fontSize:11, color:T.green}}>+ Stock</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── VALORISATION STOCK ── */}
+      {tab==="valorisation" && (
+        <SectionValorisation T={T} products={products} />
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale, ticketFormat, setTicketFormat, nbCopies, setNbCopies, ticketFooter, setTicketFooter }) {
   const [tab, setTab] = useState("stats");
   const [showForm, setShowForm] = useState(false);
   const [editProd, setEditProd] = useState(null);
@@ -3961,6 +4496,9 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
   const [depenses, setDepenses] = useState([]);
   const [depLoading, setDepLoading] = useState(true);
   const [logoUploading, setLogoUploading] = useState(false);
+  const [comptablePin, setComptablePin] = useState(() => localStorage.getItem(`pos_comptable_pin_${shopId}`) || "1234");
+  const [showComptablePinForm, setShowComptablePinForm] = useState(false);
+  const [newComptablePin, setNewComptablePin] = useState(""); const [newComptablePinConfirm, setNewComptablePinConfirm] = useState("");
 
   const db_ref = window.db;
 
@@ -4154,7 +4692,7 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
   return (
     <div style={{flex:1, overflowY:"auto", padding:12}}>
       <div style={{display:"flex", gap:5, marginBottom:14, flexWrap:"wrap", overflowX:"auto", paddingBottom:4}}>
-        {[["stats","📊 Stats"],["analytics","📈 Analyse"],["kpi","💡 KPI"],["prevision","🤖 Prévision"],["classement","🏆 Classement"],["products","📦 Produits"],["stock","📋 Stock"],["valorisation","💰 Valeur stock"],["depenses","💸 Dépenses"],["reappro","🔄 Réappro"],["commandes","🚚 Commandes"],["dettes","💳 Dettes"],["clients","🧑‍🤝‍🧑 Clients"],["promos","🎟️ Promos"],["abonnements","🔄 Abonnements"],["fournisseurs","📦 Fournisseurs"],["devis","🧾 Devis"],["retours","🔁 Retours"],["lots","🛍️ Lots"],["cloture","📅 Clôture"],["sessions","⏰ Sessions"],["audit","📋 Audit"],["import","🗂️ Import"],["qrcode","🌐 QR Code"],["alertes","🔔 Alertes"],["scanfacture","📷 Scan Facture"],["caissiers","👥 Caissiers"],["sales","🧾 Ventes"],["settings","⚙️ Param."]].filter((v,i,a)=>a.findIndex(x=>x[0]===v[0])===i).map(([k,l])=>(
+        {[["stats","📊 Stats"],["analytics","📈 Analyse"],["kpi","💡 KPI"],["prevision","🤖 Prévision"],["classement","🏆 Classement"],["repas","🍽️ Repas"],["products","📦 Produits"],["stock","📋 Stock"],["valorisation","💰 Valeur stock"],["depenses","💸 Dépenses"],["reappro","🔄 Réappro"],["commandes","🚚 Commandes"],["dettes","💳 Dettes"],["clients","🧑‍🤝‍🧑 Clients"],["promos","🎟️ Promos"],["abonnements","🔄 Abonnements"],["fournisseurs","📦 Fournisseurs"],["devis","🧾 Devis"],["retours","🔁 Retours"],["lots","🛍️ Lots"],["cloture","📅 Clôture"],["sessions","⏰ Sessions"],["audit","📋 Audit"],["import","🗂️ Import"],["qrcode","🌐 QR Code"],["alertes","🔔 Alertes"],["scanfacture","📷 Scan Facture"],["caissiers","👥 Caissiers"],["sales","🧾 Ventes"],["settings","⚙️ Param."]].filter((v,i,a)=>a.findIndex(x=>x[0]===v[0])===i).map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?T.accent:T.surface, borderRadius:12, padding:"7px 12px", flexShrink:0, fontSize:11, fontWeight:600, color:tab===k?T.bg:T.text}}>{l}</button>
         ))}
       </div>
@@ -4312,7 +4850,8 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
       {tab==="devis" && <SectionDevis T={T} shopId={shopId} shopName={shopName} products={products} addSale={addSale} flashMsg={flashMsg} />}
       {tab==="retours" && <SectionRetours T={T} shopId={shopId} sales={sales} updateStock={updateStock} flashMsg={flashMsg} />}
       {tab==="lots" && <SectionLots T={T} shopId={shopId} products={products} setProducts={setProducts} flashMsg={flashMsg} />}
-      {tab==="cloture" && <SectionCloture T={T} shopId={shopId} sales={sales} depenses={depenses} />}
+      {tab==="cloture" && <SectionCloture T={T} shopId={shopId} sales={sales} depenses={depenses} comptablePin={comptablePin} />}
+      {tab==="repas" && <SectionRepas T={T} sales={sales} products={products} />}
       {tab==="sessions" && <SectionSessions T={T} shopId={shopId} sales={sales} caissiers={caissiers} />}
       {tab==="audit" && <SectionAudit T={T} shopId={shopId} />}
       {tab==="import" && <SectionImportCSV T={T} shopId={shopId} products={products} setProducts={setProducts} flashMsg={flashMsg} />}
@@ -4561,6 +5100,25 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
               </div>
             )}
           </div>
+          {/* ── Pied de ticket ── */}
+          <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
+            <div style={{fontSize:14, fontWeight:700, marginBottom:6}}>✍️ Pied de ticket personnalisé</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:10}}>Ce texte s'affiche en bas de chaque ticket. Utilisez Entrée pour séparer les lignes (max 3 lignes).</div>
+            <textarea
+              value={ticketFooter}
+              onChange={e => {
+                const lines = e.target.value.split("\n");
+                if(lines.length <= 3) { setTicketFooter(e.target.value); localStorage.setItem("pos_ticket_footer", e.target.value); }
+              }}
+              rows={3}
+              placeholder={"Merci pour votre confiance !\n--- Mon Commerce ---"}
+              style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, resize:"none", fontSize:12, lineHeight:1.6}}
+            />
+            <div style={{fontSize:10, color:T.textMute, marginTop:4}}>Aperçu : {(ticketFooter||"").split("\n").filter(Boolean).length}/3 ligne(s)</div>
+            <div style={{marginTop:8, background:T.surface2, borderRadius:10, padding:10, borderLeft:`3px solid ${T.accent}`, fontFamily:"monospace", fontSize:11, lineHeight:1.7}}>
+              {(ticketFooter||"Merci pour votre confiance !").split("\n").filter(Boolean).map((l,i)=><div key={i} style={{textAlign:"center", color:T.text}}>{l}</div>)}
+            </div>
+          </div>
           {/* ── Logo ── */}
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🖼️ Logo du commerce</div>
@@ -4580,7 +5138,8 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🔐 Sécurité</div>
-            <button onClick={()=>setShowPinForm(true)} style={{background:T.btnBlue.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.blue}}>Changer le PIN administrateur</button>
+            <button onClick={()=>setShowPinForm(true)} style={{background:T.btnBlue.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.blue, marginBottom:8}}>Changer le PIN administrateur</button>
+            <button onClick={()=>setShowComptablePinForm(true)} style={{background:T.btnGreen.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.green}}>🧾 Changer le PIN comptable (Clôture)</button>
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>📤 Export données</div>
@@ -4633,6 +5192,27 @@ function OwnerContent({ T, shopName, whatsapp, products, setProducts, sales, fla
             <input type="password" placeholder="Nouveau PIN (4 chiffres)" value={newPin} onChange={e=>setNewPin(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, margin:"12px 0", color:T.text}} />
             <input type="password" placeholder="Confirmer le PIN" value={newPinConfirm} onChange={e=>setNewPinConfirm(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:12, color:T.text}} />
             <div style={{display:"flex", gap:8}}><button onClick={()=>{setShowPinForm(false);setNewPin("");setNewPinConfirm("");}} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button><button onClick={handlePinChange} style={{flex:1, background:T.accent, borderRadius:12, padding:12, color:T.bg}}>Modifier</button></div>
+          </div>
+        </div>
+      )}
+      {showComptablePinForm && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000}}>
+          <div style={{background:T.surface, borderRadius:24, padding:20, width:"90%", maxWidth:360}}>
+            <div style={{fontSize:18, fontWeight:800, marginBottom:4}}>🧾 PIN Comptable</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Ce PIN protège l'accès au module de clôture des comptes.</div>
+            <input type="password" placeholder="Nouveau PIN (4-6 chiffres)" maxLength={6} value={newComptablePin} onChange={e=>setNewComptablePin(e.target.value.replace(/\D/g,"").slice(0,6))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, margin:"0 0 8px", color:T.text}} />
+            <input type="password" placeholder="Confirmer le PIN" maxLength={6} value={newComptablePinConfirm} onChange={e=>setNewComptablePinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:14, color:T.text}} />
+            <div style={{display:"flex", gap:8}}>
+              <button onClick={()=>{setShowComptablePinForm(false);setNewComptablePin("");setNewComptablePinConfirm("");}} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button>
+              <button onClick={()=>{
+                if(newComptablePin.length<4){flashMsg("PIN min. 4 chiffres");return;}
+                if(newComptablePin!==newComptablePinConfirm){flashMsg("❌ PIN différents");return;}
+                setComptablePin(newComptablePin);
+                localStorage.setItem(`pos_comptable_pin_${shopId}`, newComptablePin);
+                setShowComptablePinForm(false); setNewComptablePin(""); setNewComptablePinConfirm("");
+                flashMsg("✅ PIN comptable mis à jour");
+              }} style={{flex:1, background:T.accent, borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Enregistrer</button>
+            </div>
           </div>
         </div>
       )}
