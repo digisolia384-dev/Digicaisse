@@ -1947,10 +1947,9 @@ async function buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, 
   }
 
   // ── En-tête commerce ────────────────────────────────────────
-  // Nom commerce en double hauteur pour meilleure lisibilité 80mm
   alignCenter();
   boldOn();
-  push([GS, 0x21, is80 ? 0x11 : 0x10]); // x2h+x2l sur 80mm, x2h seulement sur 57mm
+  push([GS, 0x21, is80 ? 0x11 : 0x10]); // x2h+x2l sur 80mm, x2h sur 57mm
   line(shopName.toUpperCase().slice(0, is80 ? 20 : 16));
   boldOff();
   sizeNormal();
@@ -2603,6 +2602,13 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [shopLogo, setShopLogo] = useState(session.shopLogo || null);
   const [caissDash, setCaissDash] = useState(false);
+  // ── Infos établissement modifiables ──────────────────────────
+  const [shopName, setShopName] = useState(session.shopName || "");
+  const [shopPhone, setShopPhone] = useState(session.shopPhone || "");
+  const [shopAddress, setShopAddress] = useState(session.shopAddress || "");
+  const [shopSlogan, setShopSlogan] = useState(session.shopSlogan || "");
+  // ── Mode PIN (admin ou gérant) ─────────────────────────────────
+  const [pinModalTarget, setPinModalTarget] = useState("admin");
 
   useEffect(() => { const unsub = syncShopData(session.shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers); return unsub; }, [session.shopId]);
 
@@ -2638,15 +2644,15 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     if(print) {
       try {
         if (useBLE && printer.connected) {
-          printViaBLE(shopName, shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan)
-            .catch(() => printFallback(shopName, shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan));
+          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter)
+            .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter));
           flashMsg(`✅ Vente + impression BLE ${ticketFormat}${nbCopies>1?" x"+nbCopies+" copies":""}`);
         } else {
-          printFallback(shopName, shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan);
+          printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter);
           flashMsg(`✅ Vente + impression navigateur${nbCopies>1?" x"+nbCopies+" copies":""}`);
         }
       } catch(e) {
-        printFallback(shopName, shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan);
+        printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter);
         flashMsg("✅ Vente (fallback)");
       }
     } else {
@@ -2748,48 +2754,26 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     flashMsg(`🗑️ Vente annulée : ${raison}`);
   };
 
-  // ── Infos établissement modifiables ──────────────────────────────
-  const [shopName, setShopName] = useState(session.shopName || "");
-  const [shopPhone, setShopPhone] = useState(session.shopPhone || "");
-  const [shopAddress, setShopAddress] = useState(session.shopAddress || "");
-  const [shopSlogan, setShopSlogan] = useState(session.shopSlogan || "");
-
   const saveShopInfo = async () => {
-    const updates = { shopName, shopPhone: shopPhone || null, shopAddress: shopAddress || null, shopSlogan: shopSlogan || null };
-    if (db) await db.collection("shops").doc(session.shopId).update(updates).catch(() => {});
+    const updates = { shopName, shopPhone: shopPhone||null, shopAddress: shopAddress||null, shopSlogan: shopSlogan||null };
+    if (db) await db.collection("shops").doc(session.shopId).update(updates).catch(()=>{});
     Object.assign(session, updates);
     flashMsg("✅ Informations mises à jour");
   };
 
-  // ── PIN gérant (créé par l'admin dans Firestore) ─────────────────
-  const [pinModalTarget, setPinModalTarget] = useState("admin"); // "admin" | "gerant"
-
   const verifyAdminPin = () => {
     if (pinModalTarget === "gerant") {
-      const expectedGerantPin = atob(session.gerantPin || btoa(""));
-      if (!session.gerantPin) {
-        setPinError(true); setPinShake(true);
-        setTimeout(() => { setPinShake(false); setPinInput(""); setPinError(false); }, 700);
-        return;
-      }
-      if (pinInput === expectedGerantPin) {
-        setPinModal(false); setPinInput("");
-        setGerantMode(true); setOwnerMode(false);
-      } else {
-        setPinError(true); setPinShake(true);
-        setTimeout(() => { setPinShake(false); setPinInput(""); setPinError(false); }, 700);
-      }
+      if (!session.gerantPin) { setPinError(true); setPinShake(true); setTimeout(()=>{setPinShake(false);setPinInput("");setPinError(false);},700); return; }
+      const expectedGerantPin = atob(session.gerantPin);
+      if (pinInput === expectedGerantPin) { setPinModal(false); setPinInput(""); setGerantMode(true); setOwnerMode(false); }
+      else { setPinError(true); setPinShake(true); setTimeout(()=>{setPinShake(false);setPinInput("");setPinError(false);},700); }
       return;
     }
     const expectedPin = atob(session.adminPin || btoa("0000"));
     if (pinInput === expectedPin) {
-      setPinModal(false);
-      setPinInput("");
-      setOwnerMode(true);
-      setGerantMode(false);
+      setPinModal(false); setPinInput(""); setOwnerMode(true); setGerantMode(false);
     } else {
-      setPinError(true);
-      setPinShake(true);
+      setPinError(true); setPinShake(true);
       setTimeout(() => { setPinShake(false); setPinInput(""); setPinError(false); }, 700);
     }
   };
@@ -2811,7 +2795,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
 
   const updateGerantPin = async (newPin) => {
     const newEncoded = btoa(newPin);
-    if (db) await db.collection("shops").doc(session.shopId).update({ gerantPin: newEncoded }).catch(() => {});
+    if (db) await db.collection("shops").doc(session.shopId).update({ gerantPin: newEncoded }).catch(()=>{});
     session.gerantPin = newEncoded;
     flashMsg("✅ PIN gérant défini");
   };
@@ -2853,8 +2837,8 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
       {pinModal && (
         <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.95)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2000}}>
           <div style={{background:T.surface, borderRadius:32, padding:24, width:"90%", maxWidth:360, textAlign:"center"}}>
-            <div style={{fontSize:48, marginBottom:12}}>{pinModalTarget === "gerant" ? "📋" : "👑"}</div>
-            <div style={{fontSize:18, fontWeight:800, marginBottom:8}}>{pinModalTarget === "gerant" ? "Accès Gérant" : "Accès Administrateur"}</div>
+            <div style={{fontSize:48, marginBottom:12}}>{pinModalTarget==="gerant"?"📋":"👑"}</div>
+            <div style={{fontSize:18, fontWeight:800, marginBottom:8}}>{pinModalTarget==="gerant"?"Accès Gérant":"Accès Administrateur"}</div>
             <div style={{fontSize:12, color:T.textMute, marginBottom:20}}>Entrez votre code PIN à 4 chiffres</div>
             <div style={{display:"flex", gap:12, justifyContent:"center", marginBottom:20, animation: pinShake ? "shake 0.35s ease" : "none"}}>
               {Array(4).fill(0).map((_,i)=><div key={i} style={{width:16,height:16,borderRadius:"50%", background: i < pinInput.length ? (pinError ? T.red : T.accent) : T.border}} />)}
@@ -2885,7 +2869,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
           </div>
           <button className="hdr-btn" onClick={()=>{ setMode("CAISSE"); setOwnerMode(false); setGerantMode(false); }} style={{background:mode==="CAISSE"&&!ownerMode&&!gerantMode?T.accent:"transparent", border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:mode==="CAISSE"&&!ownerMode&&!gerantMode?T.bg:T.textSub}}>🛒<span className="hdr-text-label"> Caisse</span></button>
           {!gerantMode ? (
-            <button className="hdr-btn" onClick={enterGerantMode} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.green}}>📋<span className="hdr-text-label"> Gérant</span></button>
+            <button className="hdr-btn" onClick={enterGerantMode} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.green, opacity:session.gerantPin?1:0.5}}>📋<span className="hdr-text-label"> Gérant</span></button>
           ) : (
             <button className="hdr-btn" onClick={exitGerantMode} style={{background:T.btnRed.bg, border:"none", borderRadius:8, padding:"6px 10px", fontWeight:700, color:T.red}}>✕<span className="hdr-text-label"> Gérant</span></button>
           )}
@@ -2926,7 +2910,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
               <button onClick={()=>{ setUseBLE(true); const f="57mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="57mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="57mm"?T.bg:T.text}}>🖨️ BLE 57mm</button>
               <button onClick={()=>setUseBLE(false)} style={{flex:"1 0 auto", background:!useBLE?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:!useBLE?T.bg:T.text}}>🖥️ Navigateur</button>
             </div>
-            <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} />
+            <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} currentCaissier={currentCaissier} loginCaissier={loginCaissier} caissiers={caissiers} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
             {/* Spacer so FAB doesn't cover last product card */}
             <div style={{height:80}} />
           </div>
@@ -3005,7 +2989,48 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   );
 }
 
-function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg, sales, cancelSale, shopId }) {
+function CaissePinLock({ T, caissiers, loginCaissier }) {
+  const [pinInput, setPinInput] = React.useState("");
+  const [pinError, setPinError] = React.useState(false);
+  const [pinShake, setPinShake] = React.useState(false);
+  const handleDigit = (digit) => {
+    const next = (pinInput + digit).slice(0, 4);
+    setPinInput(next);
+    if (next.length === 4) {
+      let found = null;
+      try { found = caissiers.find(c => atob(c.pin || btoa("__x__")) === next); } catch(e) {}
+      if (found) { loginCaissier(found); setPinInput(""); setPinError(false); }
+      else { setPinError(true); setPinShake(true); setTimeout(()=>{setPinShake(false);setPinInput("");setPinError(false);},700); }
+    }
+  };
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",minHeight:400,padding:20}}>
+      <div style={{fontSize:56,marginBottom:8}}>🔐</div>
+      <div style={{fontSize:20,fontWeight:800,marginBottom:4}}>Accès Caisse</div>
+      <div style={{fontSize:12,color:T.textMute,marginBottom:28,textAlign:"center"}}>Entrez votre PIN pour commencer</div>
+      <div style={{display:"flex",gap:14,marginBottom:24}}>
+        {[0,1,2,3].map(i=>(
+          <div key={i} style={{width:14,height:14,borderRadius:"50%",
+            background:i<pinInput.length?(pinError?T.red:T.accent):T.surface2,
+            border:`2px solid ${i<pinInput.length?(pinError?T.red:T.accent):T.border}`,
+            transition:"all .15s",transform:pinShake&&i<pinInput.length?"scale(1.3)":"scale(1)"}} />
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,width:"100%",maxWidth:280}}>
+        {[1,2,3,4,5,6,7,8,9,"",0,"⌫"].map((d,i)=>(
+          <button key={i} onClick={()=>{if(d==="⌫")setPinInput(p=>p.slice(0,-1));else if(d!=="")handleDigit(String(d));}}
+            style={{background:d===""?T.surface2:T.surface,border:`1px solid ${T.border}`,borderRadius:14,padding:"14px 0",fontSize:d==="⌫"?18:20,fontWeight:700,color:T.text,opacity:d===""?0:1}}>
+            {d}
+          </button>
+        ))}
+      </div>
+      {pinError&&<div style={{marginTop:16,fontSize:12,color:T.red,fontWeight:700}}>❌ PIN incorrect</div>}
+      <div style={{marginTop:24,fontSize:10,color:T.textMute,textAlign:"center"}}>{caissiers.length} caissier(s) enregistré(s)</div>
+    </div>
+  );
+}
+
+function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg, sales, cancelSale, shopId, currentCaissier, loginCaissier, caissiers, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
   const [view, setView] = useState("catalog");
   const [search, setSearch] = useState("");
   const [activeCat, setActiveCat] = useState("Tous");
@@ -3080,14 +3105,31 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
   };
 
   React.useEffect(() => () => stopScanner(), []);
-  
+
+  const reprintSale = (s) => {
+    const saleItems = (s.items||[]).map(i=>({label:i.label,amount:i.amount,qty:i.qty||1}));
+    try {
+      if (useBLE && printer && printer.connected) {
+        printViaBLE(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan)
+          .catch(()=>printFallback(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan));
+      } else {
+        printFallback(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan);
+      }
+      flashMsg("🖨️ Réimpression envoyée");
+    } catch(e) { printFallback(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, 1, "", shopAddress, shopSlogan); }
+  };
+
+  if (caissiers && caissiers.length > 0 && !currentCaissier) {
+    return <CaissePinLock T={T} caissiers={caissiers} loginCaissier={loginCaissier} />;
+  }
+
   return (
     <div style={{display:"flex", flexDirection:"column", height:"100%", overflow:"hidden"}}>
       <div style={{display:"flex", gap:6, marginBottom:12, overflowX:"auto", paddingBottom:2, flexShrink:0}}>
         <button onClick={()=>setView("catalog")} style={{flex:"1 0 auto", background:view==="catalog"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="catalog"?T.bg:T.text}}>📦 Catalogue</button>
         <button onClick={()=>setView("manual")} style={{flex:"1 0 auto", background:view==="manual"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="manual"?T.bg:T.text}}>✏️ Manuel</button>
         <button onClick={()=>setView("rapide")} style={{flex:"1 0 auto", background:view==="rapide"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="rapide"?T.bg:T.text}}>⚡ Rapide</button>
-        <button onClick={()=>setView("annulations")} style={{flex:"1 0 auto", background:view==="annulations"?T.red:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="annulations"?T.bg:T.text}}>🗑️ Annul.</button>
+        <button onClick={()=>setView("annulations")} style={{flex:"1 0 auto", background:view==="annulations"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="annulations"?T.bg:T.text}}>🧾 Historique</button>
       </div>
       
       {view === "catalog" && (
@@ -3226,9 +3268,13 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
               {!annulable && s.cancelRaison && (
                 <div style={{fontSize:10, color:T.textMute, fontStyle:"italic"}}>Motif : {s.cancelRaison}</div>
               )}
+              <button onClick={()=>reprintSale(s)}
+                style={{width:"100%", background:T.btnBlue?T.btnBlue.bg:T.surface2, border:`1px solid ${T.border}`, borderRadius:10, padding:"8px", color:T.blue||T.accent, fontWeight:700, fontSize:12, marginTop:6}}>
+                🖨️ Réimprimer ce ticket
+              </button>
               {annulable && (
                 <button onClick={()=>{setCancelModal(s); setCancelRaison("");}}
-                  style={{width:"100%", background:"#ff000015", border:`1px solid ${T.red}44`, borderRadius:10, padding:"9px", color:T.red, fontWeight:700, fontSize:12}}>
+                  style={{width:"100%", background:"#ff000015", border:`1px solid ${T.red}44`, borderRadius:10, padding:"9px", color:T.red, fontWeight:700, fontSize:12, marginTop:6}}>
                   🗑️ Annuler cette vente
                 </button>
               )}
@@ -5128,28 +5174,6 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
       {/* ── PARAMÈTRES ── */}
       {tab==="settings" && (
         <div>
-          {/* ── Informations établissement ── */}
-          <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
-            <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🏪 Informations de l'établissement</div>
-            <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Ces informations s'affichent en en-tête de chaque ticket</div>
-            <input placeholder="Nom du commerce *" value={shopName} onChange={e=>setShopName(e.target.value)}
-              style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8, fontWeight:700}} />
-            <input placeholder="Téléphone (ex: +226 70 00 00 00)" value={shopPhone} onChange={e=>setShopPhone(e.target.value)}
-              style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8}} />
-            <input placeholder="Adresse / Localisation (ex: Secteur 12, Bobo-Dioulasso)" value={shopAddress} onChange={e=>setShopAddress(e.target.value)}
-              style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8}} />
-            <input placeholder="Slogan / mention (ex: Qualité & Service)" value={shopSlogan} onChange={e=>setShopSlogan(e.target.value)}
-              style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:10}} />
-            <button onClick={saveShopInfo} style={{background:T.accent, border:"none", borderRadius:12, padding:"10px 20px", width:"100%", fontWeight:700, color:T.bg}}>💾 Enregistrer</button>
-            {/* Aperçu entête ticket */}
-            <div style={{marginTop:12, background:T.surface2, borderRadius:10, padding:10, borderLeft:`3px solid ${T.accent}`, fontFamily:"monospace", fontSize:11, lineHeight:1.8, textAlign:"center"}}>
-              <div style={{fontSize:15, fontWeight:800}}>{shopName.toUpperCase() || "NOM DU COMMERCE"}</div>
-              {shopAddress && <div style={{fontSize:10}}>{shopAddress}</div>}
-              {shopPhone && <div style={{fontSize:10}}>Tel: {shopPhone}</div>}
-              {shopSlogan && <div style={{fontSize:10, fontStyle:"italic"}}>{shopSlogan}</div>}
-              <div style={{borderTop:`1px dashed ${T.border}`, marginTop:4, paddingTop:4, fontSize:9, color:T.textMute}}>TICKET DE CAISSE</div>
-            </div>
-          </div>
           {/* ── Impression ── */}
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🖨️ Impression</div>
@@ -5216,14 +5240,30 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
             )}
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
+            <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🏪 Informations de l'établissement</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Apparaissent en en-tête de chaque ticket</div>
+            <input placeholder="Nom du commerce *" value={shopName} onChange={e=>setShopName(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8, fontWeight:700}} />
+            <input placeholder="Téléphone (ex: +226 70 00 00 00)" value={shopPhone} onChange={e=>setShopPhone(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8}} />
+            <input placeholder="Adresse / Localisation" value={shopAddress} onChange={e=>setShopAddress(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8}} />
+            <input placeholder="Slogan (ex: Qualité & Service)" value={shopSlogan} onChange={e=>setShopSlogan(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:10}} />
+            <button onClick={saveShopInfo} style={{background:T.accent, border:"none", borderRadius:12, padding:"10px 20px", width:"100%", fontWeight:700, color:T.bg, marginBottom:10}}>💾 Enregistrer</button>
+            <div style={{background:T.surface2, borderRadius:10, padding:10, fontFamily:"monospace", fontSize:11, lineHeight:1.8, textAlign:"center"}}>
+              <div style={{fontSize:15,fontWeight:800}}>{shopName.toUpperCase()||"NOM DU COMMERCE"}</div>
+              {shopAddress&&<div style={{fontSize:10}}>{shopAddress}</div>}
+              {shopPhone&&<div style={{fontSize:10}}>Tel: {shopPhone}</div>}
+              {shopSlogan&&<div style={{fontSize:10,fontStyle:"italic"}}>{shopSlogan}</div>}
+              <div style={{borderTop:`1px dashed ${T.border}`,marginTop:4,paddingTop:4,fontSize:9,color:T.textMute}}>TICKET DE CAISSE</div>
+            </div>
+          </div>
+          <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>🔐 Sécurité</div>
             <button onClick={()=>setShowPinForm(true)} style={{background:T.btnBlue.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.blue, marginBottom:8}}>Changer le PIN administrateur</button>
             <button onClick={()=>setShowComptablePinForm(true)} style={{background:T.btnGreen.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.green, marginBottom:8}}>🧾 Changer le PIN comptable (Clôture)</button>
             <button onClick={()=>setShowGerantPinForm(true)} style={{background:T.btnRed.bg, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.orange}}>
-              📋 {session.gerantPin ? "Modifier" : "Créer"} le PIN gérant
+              📋 {session&&session.gerantPin?"Modifier":"Créer"} le PIN gérant
             </button>
-            {session.gerantPin && <div style={{fontSize:10, color:T.green, marginTop:6, textAlign:"center"}}>✅ PIN gérant actif</div>}
-            {!session.gerantPin && <div style={{fontSize:10, color:T.orange, marginTop:6, textAlign:"center"}}>⚠️ Aucun PIN gérant — le bouton Gérant est désactivé</div>}
+            {session&&session.gerantPin&&<div style={{fontSize:10,color:T.green,marginTop:6,textAlign:"center"}}>✅ PIN gérant actif</div>}
+            {session&&!session.gerantPin&&<div style={{fontSize:10,color:T.orange,marginTop:6,textAlign:"center"}}>⚠️ Aucun PIN gérant défini</div>}
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>📤 Export données</div>
@@ -5279,6 +5319,25 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
           </div>
         </div>
       )}
+      {showGerantPinForm && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000}}>
+          <div style={{background:T.surface, borderRadius:24, padding:20, width:"90%", maxWidth:360}}>
+            <div style={{fontSize:18, fontWeight:800, marginBottom:4}}>📋 PIN Gérant</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Accès aux stats et stock sans accéder aux paramètres admin.</div>
+            <input type="password" placeholder="PIN gérant (4 chiffres)" maxLength={4} value={newGerantPin} onChange={e=>setNewGerantPin(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, margin:"0 0 8px", color:T.text, textAlign:"center", fontSize:18, letterSpacing:8}} />
+            <input type="password" placeholder="Confirmer le PIN" maxLength={4} value={newGerantPinConfirm} onChange={e=>setNewGerantPinConfirm(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:14, color:T.text, textAlign:"center", fontSize:18, letterSpacing:8}} />
+            <div style={{display:"flex", gap:8}}>
+              <button onClick={()=>{setShowGerantPinForm(false);setNewGerantPin("");setNewGerantPinConfirm("");}} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button>
+              <button onClick={()=>{
+                if(newGerantPin.length!==4){flashMsg("4 chiffres requis");return;}
+                if(newGerantPin!==newGerantPinConfirm){flashMsg("❌ PIN différents");return;}
+                updateGerantPin(newGerantPin);
+                setShowGerantPinForm(false);setNewGerantPin("");setNewGerantPinConfirm("");
+              }} style={{flex:1, background:T.orange, borderRadius:12, padding:12, fontWeight:700, color:"#fff"}}>Enregistrer</button>
+            </div>
+          </div>
+        </div>
+      )}
       {showComptablePinForm && (
         <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000}}>
           <div style={{background:T.surface, borderRadius:24, padding:20, width:"90%", maxWidth:360}}>
@@ -5296,25 +5355,6 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
                 setShowComptablePinForm(false); setNewComptablePin(""); setNewComptablePinConfirm("");
                 flashMsg("✅ PIN comptable mis à jour");
               }} style={{flex:1, background:T.accent, borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Enregistrer</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {showGerantPinForm && (
-        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000}}>
-          <div style={{background:T.surface, borderRadius:24, padding:20, width:"90%", maxWidth:360}}>
-            <div style={{fontSize:18, fontWeight:800, marginBottom:4}}>📋 PIN Gérant</div>
-            <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Ce PIN permet au gérant d'accéder aux stats et au stock sans voir les paramètres admin.</div>
-            <input type="password" placeholder="PIN gérant (4 chiffres)" maxLength={4} value={newGerantPin} onChange={e=>setNewGerantPin(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, margin:"0 0 8px", color:T.text, textAlign:"center", fontSize:18, letterSpacing:8}} />
-            <input type="password" placeholder="Confirmer le PIN" maxLength={4} value={newGerantPinConfirm} onChange={e=>setNewGerantPinConfirm(e.target.value.replace(/\D/g,"").slice(0,4))} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:14, color:T.text, textAlign:"center", fontSize:18, letterSpacing:8}} />
-            <div style={{display:"flex", gap:8}}>
-              <button onClick={()=>{setShowGerantPinForm(false);setNewGerantPin("");setNewGerantPinConfirm("");}} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button>
-              <button onClick={()=>{
-                if(newGerantPin.length!==4){flashMsg("PIN 4 chiffres requis");return;}
-                if(newGerantPin!==newGerantPinConfirm){flashMsg("❌ PIN différents");return;}
-                updateGerantPin(newGerantPin);
-                setShowGerantPinForm(false); setNewGerantPin(""); setNewGerantPinConfirm("");
-              }} style={{flex:1, background:T.orange, borderRadius:12, padding:12, fontWeight:700, color:"#fff"}}>Enregistrer</button>
             </div>
           </div>
         </div>
@@ -5545,4 +5585,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
+
+
 
