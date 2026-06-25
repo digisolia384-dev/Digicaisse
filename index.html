@@ -1544,6 +1544,414 @@ const ROLES={
 function getRolePerms(role){return ROLES[role]?.perms||ROLES.junior.perms;}
 
 // ══════════════════════════════════════════════════════════════════
+//  SUPER ADMIN — Dashboard & utilitaires
+// ══════════════════════════════════════════════════════════════════
+// Clé super admin dans Firestore : collection "superadmin" / doc "config"
+// Chaque admin : { id, name, pin (btoa), shopId, active, createdAt }
+// Sur chaque shop : champ sessionActive (bool, défaut true)
+
+function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
+  const [tab, setTab] = useState("shops");
+  const [shops, setShops] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [admins, setAdmins] = useState([]); // admins créés par superadmin
+  const [adminsLoading, setAdminsLoading] = useState(true);
+
+  // ── Charger tous les shops ──────────────────────────────────────
+  useEffect(() => {
+    if (!db) { setLoading(false); return; }
+    const unsub = db.collection("shops").onSnapshot(snap => {
+      setShops(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
+    return unsub;
+  }, []);
+
+  // ── Charger les admins SuperAdmin ──────────────────────────────
+  useEffect(() => {
+    if (!db) { setAdminsLoading(false); return; }
+    const unsub = db.collection("superadmin").doc("admins").collection("list")
+      .onSnapshot(snap => {
+        setAdmins(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setAdminsLoading(false);
+      }, () => setAdminsLoading(false));
+    return unsub;
+  }, []);
+
+  // ── Activer / Désactiver session d'un shop ─────────────────────
+  const toggleShopSession = async (shop) => {
+    const newVal = !shop.sessionActive && shop.sessionActive !== undefined ? true : shop.sessionActive === false ? true : false;
+    // Par défaut sessionActive=true ; on la passe à false pour désactiver
+    const val = shop.sessionActive !== false; // si c'était actif on désactive
+    try {
+      await db.collection("shops").doc(shop.id).update({ sessionActive: !val });
+      flashMsg(val ? `🔒 Session désactivée : ${shop.shopName}` : `✅ Session activée : ${shop.shopName}`);
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+  };
+
+  // ── Créer un admin pour un shop ────────────────────────────────
+  const [showAdminForm, setShowAdminForm] = useState(false);
+  const [aName, setAName] = useState("");
+  const [aPin, setAPin] = useState("");
+  const [aShopId, setAShopId] = useState("");
+
+  const createAdmin = async () => {
+    if (!aName.trim() || aPin.length < 4 || !aShopId) { flashMsg("Nom, PIN (4+ chiffres) et commerce requis"); return; }
+    const doc = { name: aName.trim(), pin: btoa(aPin), shopId: aShopId, active: true, createdAt: Date.now() };
+    try {
+      await db.collection("superadmin").doc("admins").collection("list").add(doc);
+      setAName(""); setAPin(""); setAShopId(""); setShowAdminForm(false);
+      flashMsg("✅ Admin créé");
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+  };
+
+  const toggleAdmin = async (adm) => {
+    try {
+      await db.collection("superadmin").doc("admins").collection("list").doc(adm.id).update({ active: !adm.active });
+      flashMsg(adm.active ? `🔒 Admin désactivé : ${adm.name}` : `✅ Admin activé : ${adm.name}`);
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+  };
+
+  const deleteAdmin = async (adm) => {
+    if (!window.confirm(`Supprimer l'admin ${adm.name} ?`)) return;
+    try {
+      await db.collection("superadmin").doc("admins").collection("list").doc(adm.id).delete();
+      flashMsg("🗑️ Admin supprimé");
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+  };
+
+  // ── Activités consolidées (toutes ventes de tous les shops) ─────
+  const [allSales, setAllSales] = useState([]);
+  const [salesLoading, setSalesLoading] = useState(false);
+  const loadAllSales = async () => {
+    if (!db || salesLoading) return;
+    setSalesLoading(true);
+    try {
+      const allS = [];
+      for (const shop of shops.slice(0, 20)) { // limité à 20 shops pour perfs
+        const snap = await db.collection("shops").doc(shop.id).collection("sales")
+          .orderBy("timestamp", "desc").limit(50).get();
+        snap.docs.forEach(d => allS.push({ ...d.data(), id: d.id, _shopName: shop.shopName }));
+      }
+      allS.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      setAllSales(allS);
+    } catch(e) { flashMsg("Erreur chargement ventes: " + e.message); }
+    setSalesLoading(false);
+  };
+
+  const today = new Date().toISOString().slice(0, 10);
+  const totalShops = shops.length;
+  const activeShops = shops.filter(s => s.active !== false && s.sessionActive !== false).length;
+  const expiringShops = shops.filter(s => { const d = getDaysLeft(s.subscriptionEnd); return d <= 7 && d > 0; }).length;
+  const expiredShops = shops.filter(s => getDaysLeft(s.subscriptionEnd) === 0 && s.active !== false).length;
+
+  const TABS = [["shops","🏪 Commerces"],["admins","👥 Admins"],["activites","📊 Activités"],["settings","⚙️ Paramètres"]];
+
+  return (
+    <div style={{ minHeight:"100dvh", background:T.bg, color:T.text }}>
+      {/* Header */}
+      <div style={{ background:T.header, borderBottom:`1px solid ${T.border}`, padding:"10px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:22 }}>🛡️</span>
+          <div>
+            <div style={{ fontFamily:"'Outfit'", fontSize:16, fontWeight:800, color:T.purple }}>Super Admin</div>
+            <div style={{ fontSize:9, color:T.textMute }}>Tableau de bord global</div>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:6 }}>
+          <div style={{ display:"flex", gap:2, padding:3, borderRadius:20, background:T.surface2 }}>
+            {Object.values(THEMES).map(th => (
+              <button key={th.id} onClick={() => setThemeName(th.id)}
+                className={`theme-btn${themeName===th.id?" active":""}`}
+                style={{ background: themeName===th.id ? T.accent : "transparent", color: themeName===th.id ? T.bg : T.textMute }}>
+                {th.label}
+              </button>
+            ))}
+          </div>
+          <button onClick={logout} style={{ background:"transparent", border:`1px solid ${T.border}`, borderRadius:8, padding:"4px 10px", fontSize:11, color:T.textMute }}>↩ Déco</button>
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, padding:12 }}>
+        <div style={{ background:T.surface, borderRadius:14, padding:12, border:`1px solid ${T.green}33` }}>
+          <div style={{ fontSize:10, color:T.textMute }}>Commerces actifs</div>
+          <div style={{ fontSize:28, fontWeight:800, color:T.green }}>{activeShops}</div>
+          <div style={{ fontSize:9, color:T.textMute }}>/ {totalShops} total</div>
+        </div>
+        <div style={{ background:T.surface, borderRadius:14, padding:12, border:`1px solid ${T.blue}33` }}>
+          <div style={{ fontSize:10, color:T.textMute }}>Admins créés</div>
+          <div style={{ fontSize:28, fontWeight:800, color:T.blue }}>{admins.filter(a=>a.active).length}</div>
+          <div style={{ fontSize:9, color:T.textMute }}>/ {admins.length} total</div>
+        </div>
+        <div style={{ background:T.surface, borderRadius:14, padding:12, border:`1px solid ${T.orange}33` }}>
+          <div style={{ fontSize:10, color:T.textMute }}>Abonnements expirant</div>
+          <div style={{ fontSize:28, fontWeight:800, color:T.orange }}>{expiringShops}</div>
+          <div style={{ fontSize:9, color:T.textMute }}>dans 7 jours</div>
+        </div>
+        <div style={{ background:T.surface, borderRadius:14, padding:12, border:`1px solid ${T.red}33` }}>
+          <div style={{ fontSize:10, color:T.textMute }}>Abonnements expirés</div>
+          <div style={{ fontSize:28, fontWeight:800, color:T.red }}>{expiredShops}</div>
+          <div style={{ fontSize:9, color:T.textMute }}>à renouveler</div>
+        </div>
+      </div>
+
+      {/* Onglets */}
+      <div style={{ display:"flex", gap:5, padding:"0 12px 8px", flexWrap:"wrap" }}>
+        {TABS.map(([k,l]) => (
+          <button key={k} onClick={() => setTab(k)}
+            style={{ background:tab===k?T.purple:T.surface, borderRadius:12, padding:"7px 14px", fontSize:11, fontWeight:700, color:tab===k?"#fff":T.text, border:"none" }}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding:"0 12px 32px", overflowY:"auto" }}>
+
+        {/* ── COMMERCES ── */}
+        {tab === "shops" && (
+          <div>
+            {loading && <div className="spin" style={{ width:28,height:28,border:`2px solid ${T.border}`,borderTopColor:T.accent,borderRadius:"50%",margin:"20px auto" }}></div>}
+            {shops.map(shop => {
+              const daysLeft = getDaysLeft(shop.subscriptionEnd);
+              const isActive = shop.active !== false && shop.sessionActive !== false;
+              const isSessionOff = shop.sessionActive === false;
+              const statusColor = isSessionOff ? T.orange : shop.active === false ? T.red : daysLeft <= 0 ? T.red : daysLeft <= 7 ? T.orange : T.green;
+              return (
+                <div key={shop.id} style={{ background:T.surface, borderRadius:14, padding:14, marginBottom:10, borderLeft:`4px solid ${statusColor}` }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"start", flexWrap:"wrap", gap:8 }}>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:800, fontSize:14 }}>{shop.shopName}</div>
+                      <div style={{ fontSize:10, color:T.textMute }}>👤 {shop.ownerName} · 📱 {shop.whatsapp}</div>
+                      <div style={{ fontSize:10, color:T.textMute }}>📅 Créé: {formatDate(shop.createdAt)} · Plan: {shop.plan||"mensuel"}</div>
+                      {shop.subscriptionEnd && <div style={{ fontSize:10, color:daysLeft<=7?T.red:T.textMute }}>⏳ Expire dans {daysLeft}j ({formatDate(shop.subscriptionEnd)})</div>}
+                    </div>
+                    <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4 }}>
+                      <span style={{ fontSize:10, fontWeight:700, color:statusColor }}>
+                        {isSessionOff ? "🔶 Session OFF" : shop.active===false ? "🔴 Inactif" : daysLeft<=0 ? "⚠️ Expiré" : daysLeft<=7 ? "⚠️ Bientôt expiré" : "🟢 Actif"}
+                      </span>
+                      <button onClick={() => toggleShopSession(shop)}
+                        style={{ background: isSessionOff ? T.btnGreen.bg : T.btnRed.bg, border:"none", borderRadius:8, padding:"5px 12px", fontSize:11, fontWeight:700, color: isSessionOff ? T.green : T.red }}>
+                        {isSessionOff ? "▶ Activer session" : "⏸ Désactiver session"}
+                      </button>
+                    </div>
+                  </div>
+                  {/* Statistiques rapides du shop */}
+                  <ShopQuickStats T={T} shopId={shop.id} />
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── ADMINS ── */}
+        {tab === "admins" && (
+          <div>
+            <div style={{ background:T.surface2, borderRadius:12, padding:12, marginBottom:12, fontSize:11, color:T.textMute }}>
+              ℹ️ Les admins créés ici peuvent accéder à n'importe quel commerce via leur PIN. Chaque admin est lié à un commerce spécifique.
+            </div>
+            <button onClick={() => setShowAdminForm(true)}
+              style={{ background:T.purple, border:"none", borderRadius:12, padding:12, marginBottom:12, width:"100%", fontWeight:700, color:"#fff" }}>
+              + Créer un nouvel admin
+            </button>
+
+            {showAdminForm && (
+              <div style={{ background:T.surface, borderRadius:16, padding:16, marginBottom:12, border:`1px solid ${T.purple}44` }}>
+                <div style={{ fontSize:14, fontWeight:700, marginBottom:10, color:T.purple }}>👥 Nouvel Admin</div>
+                <input placeholder="Nom complet" value={aName} onChange={e => setAName(e.target.value)}
+                  style={{ width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8 }} />
+                <input type="password" placeholder="PIN (4-6 chiffres)" maxLength={6} value={aPin} onChange={e => setAPin(e.target.value.replace(/\D/g,""))}
+                  style={{ width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:8 }} />
+                <select value={aShopId} onChange={e => setAShopId(e.target.value)}
+                  style={{ width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, color:T.text, marginBottom:12 }}>
+                  <option value="">— Choisir un commerce —</option>
+                  {shops.map(s => <option key={s.id} value={s.id}>{s.shopName}</option>)}
+                </select>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => { setShowAdminForm(false); setAName(""); setAPin(""); setAShopId(""); }}
+                    style={{ flex:1, background:T.surface2, border:"none", borderRadius:10, padding:10 }}>Annuler</button>
+                  <button onClick={createAdmin}
+                    style={{ flex:1, background:T.purple, border:"none", borderRadius:10, padding:10, fontWeight:700, color:"#fff" }}>Créer</button>
+                </div>
+              </div>
+            )}
+
+            {adminsLoading && <div style={{ textAlign:"center", padding:20, color:T.textMute }}>⏳ Chargement...</div>}
+            {!adminsLoading && admins.length === 0 && (
+              <div style={{ textAlign:"center", padding:40, color:T.textMute, fontSize:12 }}>Aucun admin créé</div>
+            )}
+            {admins.map(adm => {
+              const shop = shops.find(s => s.id === adm.shopId);
+              return (
+                <div key={adm.id} style={{ background:T.surface, borderRadius:12, padding:12, marginBottom:8, borderLeft:`3px solid ${adm.active ? T.purple : T.red}` }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"start" }}>
+                    <div>
+                      <div style={{ fontWeight:700 }}>👤 {adm.name}</div>
+                      <div style={{ fontSize:10, color:T.textMute }}>Commerce: {shop?.shopName || adm.shopId}</div>
+                      <div style={{ fontSize:9, color:T.textMute }}>Créé: {formatDate(adm.createdAt)}</div>
+                      <span style={{ fontSize:9, fontWeight:700, color:adm.active?T.green:T.red }}>
+                        {adm.active ? "✅ Actif" : "🔒 Désactivé"}
+                      </span>
+                    </div>
+                    <div style={{ display:"flex", gap:6 }}>
+                      <button onClick={() => toggleAdmin(adm)}
+                        style={{ background: adm.active ? T.btnRed.bg : T.btnGreen.bg, border:"none", borderRadius:8, padding:"5px 10px", fontSize:11, color: adm.active ? T.red : T.green }}>
+                        {adm.active ? "🔒 Désactiver" : "✅ Activer"}
+                      </button>
+                      <button onClick={() => deleteAdmin(adm)}
+                        style={{ background:T.btnRed.bg, border:"none", borderRadius:8, padding:"5px 8px", color:T.red }}>🗑️</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── ACTIVITÉS ── */}
+        {tab === "activites" && (
+          <div>
+            <div style={{ background:T.surface2, borderRadius:12, padding:12, marginBottom:10, fontSize:11, color:T.textMute }}>
+              📊 Activités consolidées de tous les commerces (50 dernières ventes par commerce, max 20 commerces)
+            </div>
+            {allSales.length === 0 && !salesLoading && (
+              <button onClick={loadAllSales}
+                style={{ background:T.purple, border:"none", borderRadius:12, padding:14, width:"100%", fontWeight:700, color:"#fff", marginBottom:12 }}>
+                🔄 Charger les activités
+              </button>
+            )}
+            {salesLoading && <div className="spin" style={{ width:28,height:28,border:`2px solid ${T.border}`,borderTopColor:T.purple,borderRadius:"50%",margin:"20px auto" }}></div>}
+            {allSales.map(sale => (
+              <div key={sale.id + sale._shopName} style={{ background:T.surface, borderRadius:10, padding:10, marginBottom:6, borderLeft:`3px solid ${sale.cancelled?T.red:T.green}` }}>
+                <div style={{ display:"flex", justifyContent:"space-between" }}>
+                  <div>
+                    <div style={{ fontSize:11, fontWeight:700 }}>{sale._shopName}</div>
+                    <div style={{ fontSize:10, color:T.textMute }}>
+                      {sale.caissier ? `👤 ${sale.caissier}` : "Admin"} · {sale.date}
+                      {sale.timestamp && ` à ${new Date(sale.timestamp).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}`}
+                    </div>
+                  </div>
+                  <div style={{ textAlign:"right" }}>
+                    <div style={{ fontWeight:800, color:sale.cancelled?T.red:T.accent }}>{sale.cancelled?"❌":""}{fmtPrice(sale.total)}</div>
+                    <div style={{ fontSize:9, color:T.textMute }}>{(sale.items||[]).length} art.</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {allSales.length > 0 && (
+              <button onClick={loadAllSales} style={{ background:T.surface2, border:`1px solid ${T.border}`, borderRadius:10, padding:10, width:"100%", fontSize:11, color:T.textMute, marginTop:8 }}>
+                🔄 Actualiser
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* ── PARAMÈTRES ── */}
+        {tab === "settings" && (
+          <div>
+            <div style={{ background:T.surface, borderRadius:14, padding:16, marginBottom:12 }}>
+              <div style={{ fontSize:14, fontWeight:700, marginBottom:8 }}>🎨 Thème</div>
+              <div style={{ display:"flex", gap:8 }}>
+                {Object.values(THEMES).map(th => (
+                  <button key={th.id} onClick={() => setThemeName(th.id)}
+                    style={{ flex:1, background:themeName===th.id?T.accent:T.surface2, border:`2px solid ${themeName===th.id?T.accent:T.border}`, borderRadius:10, padding:10, fontWeight:700, color:themeName===th.id?T.bg:T.text }}>
+                    {th.label} {th.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ background:T.surface2, borderRadius:12, padding:12, fontSize:11, color:T.textMute }}>
+              <div style={{ fontWeight:700, color:T.purple, marginBottom:4 }}>🛡️ Super Admin — Informations</div>
+              <div>PIN d'accès : <code style={{ background:T.surface, padding:"1px 6px", borderRadius:4 }}>{DEV_PIN}</code> (triple-clic sur le logo)</div>
+              <div style={{ marginTop:4 }}>Données Firestore : <code>superadmin/admins/list</code></div>
+              <div style={{ marginTop:4 }}>Suspension shop : champ <code>sessionActive: false</code> sur le document shop</div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+// ── Statistiques rapides d'un shop (lazy) ──────────────────────────────
+function ShopQuickStats({ T, shopId }) {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const load = async () => {
+    if (stats || loading || !db) return;
+    setLoading(true);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const snap = await db.collection("shops").doc(shopId).collection("sales")
+        .where("date", "==", today).get();
+      const sales = snap.docs.map(d => d.data()).filter(s => !s.cancelled && s.id !== "_init");
+      const ca = sales.reduce((a, s) => a + (s.total || 0), 0);
+      // Grouper par caissier
+      const byCaissier = {};
+      sales.forEach(s => {
+        const k = s.caissier || "Admin";
+        byCaissier[k] = (byCaissier[k] || 0) + (s.total || 0);
+      });
+      setStats({ ca, nb: sales.length, byCaissier });
+    } catch(e) { setStats({ ca: 0, nb: 0, byCaissier: {} }); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ marginTop:8, paddingTop:8, borderTop:`1px solid ${T.border}` }}>
+      <button onClick={() => { setExpanded(!expanded); if (!expanded) load(); }}
+        style={{ background:"transparent", border:"none", fontSize:10, color:T.blue, padding:0, cursor:"pointer" }}>
+        {expanded ? "▲ Masquer stats" : "▼ Stats du jour"}
+      </button>
+      {expanded && (
+        <div style={{ marginTop:8 }}>
+          {loading && <span style={{ fontSize:10, color:T.textMute }}>⏳...</span>}
+          {stats && (
+            <div>
+              <div style={{ display:"flex", gap:8, marginBottom:6 }}>
+                <div style={{ background:T.surface2, borderRadius:8, padding:"6px 10px", flex:1, textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:T.textMute }}>CA Auj.</div>
+                  <div style={{ fontWeight:800, color:T.green, fontSize:13 }}>{fmtPrice(stats.ca)}</div>
+                </div>
+                <div style={{ background:T.surface2, borderRadius:8, padding:"6px 10px", flex:1, textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:T.textMute }}>Ventes</div>
+                  <div style={{ fontWeight:800, color:T.blue, fontSize:13 }}>{stats.nb}</div>
+                </div>
+              </div>
+              {Object.entries(stats.byCaissier).length > 0 && (
+                <div>
+                  <div style={{ fontSize:9, color:T.textMute, marginBottom:4 }}>Par caissier aujourd'hui :</div>
+                  {Object.entries(stats.byCaissier).map(([name, ca]) => (
+                    <div key={name} style={{ display:"flex", justifyContent:"space-between", fontSize:10, padding:"2px 0" }}>
+                      <span style={{ color:T.text }}>👤 {name}</span>
+                      <span style={{ fontWeight:700, color:T.accent }}>{fmtPrice(ca)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Vérification session SuperAdmin côté shop ──────────────────────────
+// Appelé au démarrage du shop pour vérifier si sessionActive !== false
+async function checkShopSessionActive(shopId) {
+  if (!db || !shopId) return true;
+  try {
+    const doc = await db.collection("shops").doc(shopId).get();
+    if (!doc.exists) return false;
+    return doc.data().sessionActive !== false;
+  } catch(e) { return true; } // en cas d'erreur réseau, on laisse passer
+}
+
+// ══════════════════════════════════════════════════════════════════
 //  FEAT 15 — SESSIONS DE TRAVAIL
 // ══════════════════════════════════════════════════════════════════
 function SectionSessions({ T, shopId, sales, caissiers }) {
@@ -2422,7 +2830,7 @@ function App() {
     if (devPin === DEV_PIN) {
       setDevMode(false);
       setDevPin("");
-      setSession({ shopId: "dev_dashboard", shopName: "Développeur", ownerName: "Admin", isDev: true });
+      setSession({ shopId: "dev_dashboard", shopName: "Développeur", ownerName: "Admin", isDev: true, isSuperAdmin: true });
     } else {
       setDevPinError(true);
       setDevPinShake(true);
@@ -2463,6 +2871,7 @@ function App() {
       const data = doc.data();
       if(btoa(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
       if(data.active === false) throw new Error("Compte désactivé");
+      if(data.sessionActive === false) throw new Error("Session suspendue par l'administrateur — contactez le support");
       const newSession = { 
         shopId: doc.id, shopName: data.shopName, shopPhone: data.phone || "", 
         whatsapp: data.whatsapp, ownerName: data.ownerName, plan: data.plan || "mensuel", 
@@ -2494,6 +2903,7 @@ function App() {
         if (doc.exists) {
           const data = doc.data();
           if (data.active === false) { logout(); return; }
+          if (data.sessionActive === false) { logout(); return; }
           // Met à jour la session avec les données fraîches
           const refreshed = {
             ...session,
@@ -2573,7 +2983,8 @@ function App() {
     );
   }
 
-  if(session.isDev) return <DevDashboard T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} />;
+  if(session?.isSuperAdmin) return <SuperAdminDashboard T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} />;
+  if(session?.isDev) return <DevDashboard T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} />;
   return <MainApp session={session} T={T} themeName={themeName} setThemeName={setThemeName} logout={logout} flashMsg={flashMsg} sessionRestored={sessionRestored} reAuthPending={reAuthPending} />;
 }
 
@@ -2732,6 +3143,11 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     setCaissiers(updated);
     OfflineStore.set(session.shopId, "caissiers", updated);
     if(db) db.collection("shops").doc(session.shopId).collection("caissiers").doc(caissier.id).set(caissier).catch(()=>{});
+    // Sync immediate si c est le caissier connecte
+    if (currentCaissier && currentCaissier.id === caissier.id) {
+      setCurrentCaissier(caissier);
+      sessionStorage.setItem("pos_caissier_"+session.shopId, JSON.stringify(caissier));
+    }
   };
   const deleteCaissier = async (id) => {
     const updated = caissiers.filter(c=>c.id!==id);
@@ -3032,6 +3448,17 @@ function CaissePinLock({ T, caissiers, loginCaissier }) {
 
 function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg, sales, cancelSale, shopId, currentCaissier, loginCaissier, caissiers, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
   const [view, setView] = useState("catalog");
+  // Source de verite des flags : caissiers[] (live Firestore) > currentCaissier (sessionStorage stale)
+  const activeCaissier = currentCaissier
+    ? (caissiers.find(c => c.id === currentCaissier.id) || currentCaissier)
+    : null;
+  const canVenteRapide = !activeCaissier?.disableVenteRapide;
+  const canManuel = !activeCaissier?.disableManuel;
+  // Rediriger si la vue active est bloquée pour ce caissier
+  useEffect(() => {
+    if (view === "rapide" && !canVenteRapide) setView("catalog");
+    if (view === "manual" && !canManuel) setView("catalog");
+  }, [canVenteRapide, canManuel, view]);
   const [search, setSearch] = useState("");
   const [activeCat, setActiveCat] = useState("Tous");
   const [manualLabel, setManualLabel] = useState("");
@@ -3127,8 +3554,16 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
     <div style={{display:"flex", flexDirection:"column", height:"100%", overflow:"hidden"}}>
       <div style={{display:"flex", gap:6, marginBottom:12, overflowX:"auto", paddingBottom:2, flexShrink:0}}>
         <button onClick={()=>setView("catalog")} style={{flex:"1 0 auto", background:view==="catalog"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="catalog"?T.bg:T.text}}>📦 Catalogue</button>
-        <button onClick={()=>setView("manual")} style={{flex:"1 0 auto", background:view==="manual"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="manual"?T.bg:T.text}}>✏️ Manuel</button>
-        <button onClick={()=>setView("rapide")} style={{flex:"1 0 auto", background:view==="rapide"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="rapide"?T.bg:T.text}}>⚡ Rapide</button>
+        {canManuel ? (
+          <button onClick={()=>setView("manual")} style={{flex:"1 0 auto", background:view==="manual"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="manual"?T.bg:T.text}}>✏️ Manuel</button>
+        ) : (
+          <button disabled title="Module désactivé par l'admin" style={{flex:"1 0 auto", background:T.surface2, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:T.textMute, opacity:0.45, cursor:"not-allowed"}}>✏️ Manuel 🔒</button>
+        )}
+        {canVenteRapide ? (
+          <button onClick={()=>setView("rapide")} style={{flex:"1 0 auto", background:view==="rapide"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="rapide"?T.bg:T.text}}>⚡ Rapide</button>
+        ) : (
+          <button disabled title="Module désactivé par l'admin" style={{flex:"1 0 auto", background:T.surface2, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:T.textMute, opacity:0.45, cursor:"not-allowed"}}>⚡ Rapide 🔒</button>
+        )}
         <button onClick={()=>setView("annulations")} style={{flex:"1 0 auto", background:view==="annulations"?T.accent:T.surface, borderRadius:12, padding:"8px 10px", fontWeight:600, fontSize:12, color:view==="annulations"?T.bg:T.text}}>🧾 Historique</button>
       </div>
       
@@ -4724,8 +5159,14 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
   };
   const addCaissier = () => {
     if(!cName.trim()||cPin.length!==4){flashMsg("Nom et PIN 4 chiffres requis");return;}
-    const c = {id:Date.now().toString(36)+Math.random().toString(36).slice(2), name:cName.trim(), pin:btoa(cPin)};
+    const c = {id:Date.now().toString(36)+Math.random().toString(36).slice(2), name:cName.trim(), pin:btoa(cPin), disableVenteRapide:false, disableManuel:false};
     saveCaissier(c); setCName(""); setCPin(""); setShowCaisForm(false); flashMsg(`👤 ${c.name} ajouté`);
+  };
+  const toggleCaissierModule = (caissier, module) => {
+    const updated = { ...caissier, [module]: !caissier[module] };
+    saveCaissier(updated);
+    const label = module==="disableVenteRapide" ? "Vente rapide" : "Vente manuelle";
+    flashMsg(`${label} ${updated[module]?"🔒 désactivée":"✅ activée"} pour ${caissier.name}`);
   };
   const statsByCaissier = () => {
     const map = {};
@@ -5124,7 +5565,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
             const caTotal = caSales.reduce((a,b)=>a+(b.total||0),0);
             return (
               <div key={c.id} style={{background:T.surface, borderRadius:12, padding:12, marginBottom:8}}>
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
                   <div>
                     <div style={{fontWeight:700}}>👤 {c.name}{c.role && <span style={{marginLeft:6, fontSize:9, background:(ROLES[c.role]?.color||"#aaa")+"33", color:ROLES[c.role]?.color||"#aaa", borderRadius:6, padding:"1px 6px", fontWeight:700}}>{ROLES[c.role]?.label||c.role}</span>}</div>
                     <div style={{fontSize:11, color:T.textMute}}>CA total: <span style={{color:T.green}}>{fmtPrice(caTotal)}</span> · {caSales.length} ventes</div>
@@ -5133,6 +5574,18 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
                     <button onClick={()=>{setLoginTarget(c); setCaisLoginModal(true);}} style={{background:T.accent, border:"none", borderRadius:8, padding:"5px 10px", fontSize:11, color:T.bg, fontWeight:600}}>Connecter</button>
                     <button onClick={()=>{if(confirm(`Supprimer ${c.name} ?`)) deleteCaissier(c.id);}} style={{background:T.btnRed.bg, border:"none", borderRadius:8, padding:"5px 8px"}}>🗑️</button>
                   </div>
+                </div>
+                {/* ── Contrôle des modules ── */}
+                <div style={{borderTop:`1px solid ${T.border}`, paddingTop:8, display:"flex", gap:6, flexWrap:"wrap"}}>
+                  <div style={{fontSize:9, color:T.textMute, width:"100%", marginBottom:2}}>🔧 Modules autorisés :</div>
+                  <button onClick={()=>toggleCaissierModule(c,"disableVenteRapide")}
+                    style={{flex:1, background:c.disableVenteRapide?T.btnRed.bg:T.btnGreen.bg, border:`1px solid ${c.disableVenteRapide?T.red:T.green}44`, borderRadius:8, padding:"5px 8px", fontSize:10, fontWeight:700, color:c.disableVenteRapide?T.red:T.green}}>
+                    ⚡ Vente rapide {c.disableVenteRapide?"🔒 OFF":"✅ ON"}
+                  </button>
+                  <button onClick={()=>toggleCaissierModule(c,"disableManuel")}
+                    style={{flex:1, background:c.disableManuel?T.btnRed.bg:T.btnGreen.bg, border:`1px solid ${c.disableManuel?T.red:T.green}44`, borderRadius:8, padding:"5px 8px", fontSize:10, fontWeight:700, color:c.disableManuel?T.red:T.green}}>
+                    ✏️ Vente manuelle {c.disableManuel?"🔒 OFF":"✅ ON"}
+                  </button>
                 </div>
               </div>
             );
@@ -5585,6 +6038,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
+
+
+
+
 
 
 
