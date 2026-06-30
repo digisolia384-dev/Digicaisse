@@ -246,6 +246,8 @@ function formatDate(ts) { if(!ts) return "—"; return new Date(ts).toLocaleDate
 function getDaysLeft(endTimestamp) { if(!endTimestamp) return 0; const diff = endTimestamp - Date.now(); return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24))); }
 function getPlanDuration(plan) { switch(plan) { case "mensuel": return 30; case "trimestriel": return 90; case "annuel": return 365; default: return 30; } }
 function calculateEndDate(startDate, plan) { const end = new Date(startDate); end.setDate(end.getDate() + getPlanDuration(plan)); return end.getTime(); }
+function calculateEndDateDays(startDate, days) { const end = new Date(startDate); end.setDate(end.getDate() + (parseInt(days)||0)); return end.getTime(); }
+function planLabel(plan) { switch(plan) { case "mensuel": return "MENSUEL"; case "trimestriel": return "TRIMESTRIEL"; case "annuel": return "ANNUEL"; case "personnalise": return "PERSONNALISÉ"; default: return "MENSUEL"; } }
 function getStoreKey(shopId, type) { return `pos_${shopId}_${type}`; }
 
 class OfflineStore {
@@ -1556,6 +1558,8 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
   const [loading, setLoading] = useState(true);
   const [admins, setAdmins] = useState([]); // admins créés par superadmin
   const [adminsLoading, setAdminsLoading] = useState(true);
+  const [planModalShop, setPlanModalShop] = useState(null);
+  const [planForm, setPlanForm] = useState({ plan: "mensuel", customMode: "days", customDays: "", customDate: "", from: "today" });
 
   // ── Charger tous les shops ──────────────────────────────────────
   useEffect(() => {
@@ -1586,6 +1590,40 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
     try {
       await db.collection("shops").doc(shop.id).update({ sessionActive: !val });
       flashMsg(val ? `🔒 Session désactivée : ${shop.shopName}` : `✅ Session activée : ${shop.shopName}`);
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+  };
+
+  // ── Gestion manuelle de l'abonnement ────────────────────────────
+  const openPlanModal = (shop) => {
+    setPlanModalShop(shop);
+    setPlanForm({ plan: shop.plan || "mensuel", customMode: "days", customDays: "", customDate: "", from: "today" });
+  };
+
+  const previewNewEnd = (shop, form) => {
+    if(!shop) return null;
+    const base = form.from === "extend" && shop.subscriptionEnd && shop.subscriptionEnd > Date.now() ? shop.subscriptionEnd : Date.now();
+    if(form.plan === "personnalise") {
+      if(form.customMode === "date") {
+        if(!form.customDate) return null;
+        return new Date(form.customDate + "T23:59:59").getTime();
+      }
+      const days = parseInt(form.customDays) || 0;
+      if(days <= 0) return null;
+      return calculateEndDateDays(base, days);
+    }
+    return calculateEndDate(base, form.plan);
+  };
+
+  const confirmPlanChange = async () => {
+    const shop = planModalShop;
+    if(!shop) return;
+    const newEnd = previewNewEnd(shop, planForm);
+    if(!newEnd) { flashMsg(planForm.customMode === "date" ? "Choisissez une date" : "Entrez un nombre de jours valide"); return; }
+    const base = planForm.from === "extend" && shop.subscriptionEnd && shop.subscriptionEnd > Date.now() ? shop.subscriptionEnd : Date.now();
+    try {
+      await db.collection("shops").doc(shop.id).update({ plan: planForm.plan, subscriptionStart: base, subscriptionEnd: newEnd });
+      flashMsg(`Abonnement ${shop.shopName} mis à jour : ${planLabel(planForm.plan)}`);
+      setPlanModalShop(null);
     } catch(e) { flashMsg("Erreur: " + e.message); }
   };
 
@@ -1730,6 +1768,10 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
                       <span style={{ fontSize:10, fontWeight:700, color:statusColor }}>
                         {isSessionOff ? "🔶 Session OFF" : shop.active===false ? "🔴 Inactif" : daysLeft<=0 ? "⚠️ Expiré" : daysLeft<=7 ? "⚠️ Bientôt expiré" : "🟢 Actif"}
                       </span>
+                      <button onClick={() => openPlanModal(shop)}
+                        style={{ background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"5px 12px", fontSize:11, fontWeight:600, color:T.text }}>
+                        📝 Gérer abonnement
+                      </button>
                       <button onClick={() => toggleShopSession(shop)}
                         style={{ background: isSessionOff ? T.btnGreen.bg : T.btnRed.bg, border:"none", borderRadius:8, padding:"5px 12px", fontSize:11, fontWeight:700, color: isSessionOff ? T.green : T.red }}>
                         {isSessionOff ? "▶ Activer session" : "⏸ Désactiver session"}
@@ -1870,6 +1912,64 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
         )}
 
       </div>
+      {planModalShop && (() => {
+        const shop = planModalShop;
+        const preview = previewNewEnd(shop, planForm);
+        const canExtend = shop.subscriptionEnd && shop.subscriptionEnd > Date.now();
+        const PLAN_OPTS = [["mensuel","📅 Mensuel","30 jours"],["trimestriel","📆 Trimestriel","90 jours"],["annuel","🗓️ Annuel","365 jours"],["personnalise","✏️ Personnalisé","jours libres ou date"]];
+        return (
+          <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:16}}>
+            <div style={{background:T.surface, borderRadius:24, padding:20, width:"100%", maxWidth:380, maxHeight:"90vh", overflowY:"auto"}}>
+              <div style={{fontSize:16, fontWeight:800, marginBottom:2}}>📝 Gérer l'abonnement</div>
+              <div style={{fontSize:11, color:T.textMute, marginBottom:14}}>{shop.shopName} · actuellement {planLabel(shop.plan)}{shop.subscriptionEnd ? ` (expire le ${formatDate(shop.subscriptionEnd)})` : ""}</div>
+
+              <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Plan</div>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14}}>
+                {PLAN_OPTS.map(([val,lbl,sub])=>(
+                  <button key={val} onClick={()=>setPlanForm(f=>({...f, plan:val}))} style={{background:planForm.plan===val?T.accent:T.surface2, border:`1px solid ${planForm.plan===val?T.accent:T.border}`, borderRadius:12, padding:"10px 8px", textAlign:"left"}}>
+                    <div style={{fontWeight:700, fontSize:12, color:planForm.plan===val?T.bg:T.text}}>{lbl}</div>
+                    <div style={{fontSize:9, color:planForm.plan===val?T.bg:T.textMute}}>{sub}</div>
+                  </button>
+                ))}
+              </div>
+
+              {planForm.plan === "personnalise" && (
+                <div style={{marginBottom:14}}>
+                  <div style={{display:"flex", gap:6, marginBottom:8}}>
+                    <button onClick={()=>setPlanForm(f=>({...f, customMode:"days"}))} style={{flex:1, background:planForm.customMode==="days"?T.btnBlue.bg:T.surface2, border:`1px solid ${planForm.customMode==="days"?T.blue:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.customMode==="days"?T.blue:T.textMute}}>🔢 Nombre de jours</button>
+                    <button onClick={()=>setPlanForm(f=>({...f, customMode:"date"}))} style={{flex:1, background:planForm.customMode==="date"?T.btnBlue.bg:T.surface2, border:`1px solid ${planForm.customMode==="date"?T.blue:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.customMode==="date"?T.blue:T.textMute}}>📆 Date précise</button>
+                  </div>
+                  {planForm.customMode === "days" ? (
+                    <input type="number" min="1" placeholder="Ex: 45" value={planForm.customDays} onChange={e=>setPlanForm(f=>({...f, customDays:e.target.value}))} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:10, color:T.text}} />
+                  ) : (
+                    <input type="date" value={planForm.customDate} onChange={e=>setPlanForm(f=>({...f, customDate:e.target.value}))} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:10, color:T.text}} />
+                  )}
+                </div>
+              )}
+
+              {(planForm.plan !== "personnalise" || planForm.customMode === "days") && (
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Point de départ</div>
+                  <div style={{display:"flex", gap:6}}>
+                    <button onClick={()=>setPlanForm(f=>({...f, from:"today"}))} style={{flex:1, background:planForm.from==="today"?T.accent:T.surface2, border:`1px solid ${planForm.from==="today"?T.accent:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.from==="today"?T.bg:T.textMute}}>À partir d'aujourd'hui</button>
+                    <button disabled={!canExtend} onClick={()=>setPlanForm(f=>({...f, from:"extend"}))} style={{flex:1, opacity:canExtend?1:0.4, background:planForm.from==="extend"?T.accent:T.surface2, border:`1px solid ${planForm.from==="extend"?T.accent:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.from==="extend"?T.bg:T.textMute}}>Prolonger depuis l'expiration</button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:16, textAlign:"center"}}>
+                <div style={{fontSize:10, color:T.textMute}}>Nouvelle date d'expiration</div>
+                <div style={{fontSize:18, fontWeight:800, color:preview?T.accent:T.textMute}}>{preview ? formatDate(preview) : "—"}</div>
+              </div>
+
+              <div style={{display:"flex", gap:8}}>
+                <button onClick={()=>setPlanModalShop(null)} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button>
+                <button onClick={confirmPlanChange} style={{flex:1, background:T.accent, borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Valider</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2517,7 +2617,7 @@ function SubscriptionBanner({ T, shopId }) {
   const bgColor = expired ? T.red : T.orange;
   const message = expired 
     ? `⚠️⚠️⚠️ VOTRE ABONNEMENT A EXPIRE ! Veuillez contacter l'administrateur immédiatement pour renouveler. ⚠️⚠️⚠️`
-    : `🔔🔔🔔 Votre abonnement ${subscription.plan === "mensuel" ? "MENSUEL" : subscription.plan === "trimestriel" ? "TRIMESTRIEL" : "ANNUEL"} expire dans ${daysLeft} JOUR${daysLeft > 1 ? "S" : ""} (le ${formatDate(subscription.end)}). Contactez-nous pour renouveler ! 🔔🔔🔔`;
+    : `🔔🔔🔔 Votre abonnement ${planLabel(subscription.plan)} expire dans ${daysLeft} JOUR${daysLeft > 1 ? "S" : ""} (le ${formatDate(subscription.end)}). Contactez-nous pour renouveler ! 🔔🔔🔔`;
   
   return (
     <div style={{ 
@@ -2535,7 +2635,7 @@ function SubscriptionBanner({ T, shopId }) {
         {message} &nbsp;&nbsp;&nbsp; {message} &nbsp;&nbsp;&nbsp; {message}
       </div>
       <a 
-        href={`https://wa.me/${DEV_WHATSAPP}?text=${encodeURIComponent(`Bonjour, je souhaite renouveler mon abonnement (${subscription.plan}) pour ${subscription.plan === "mensuel" ? "30 jours" : subscription.plan === "trimestriel" ? "90 jours" : "365 jours"}`)}`}
+        href={`https://wa.me/${DEV_WHATSAPP}?text=${encodeURIComponent(`Bonjour, je souhaite renouveler mon abonnement (${planLabel(subscription.plan)}), il expire le ${formatDate(subscription.end)}.`)}`}
         target="_blank"
         rel="noopener noreferrer"
         style={{ 
@@ -2677,7 +2777,7 @@ function VenteRapide({ T, addSale, flashMsg }) {
   };
   
   return (
-    <div style={{display:"flex", flexDirection:"column"}}>
+    <div style={{display:"flex", flexDirection:"column", width:"100%", maxWidth:480, margin:"0 auto", boxSizing:"border-box"}}>
       <div style={{padding:"0 0 4px"}}>
         <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12, border:`2px solid ${modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.border)}`}}>
           {!modeMonnaie && (
@@ -2700,9 +2800,9 @@ function VenteRapide({ T, addSale, flashMsg }) {
               )}
             </>
           )}
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline"}}>
-            <span style={{fontSize:11, color:T.textMute}}>{modeMonnaie ? "Montant reçu" : "Montant"}</span>
-            <span style={{fontSize:36, fontWeight:800, color:modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.textMute)}}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:8}}>
+            <span style={{fontSize:11, color:T.textMute, flexShrink:0}}>{modeMonnaie ? "Montant reçu" : "Montant"}</span>
+            <span style={{fontSize:"clamp(24px,8vw,36px)", fontWeight:800, color:modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.textMute), overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
               {modeMonnaie ? (recu ? fmtPrice(recuNum) : "—") : (montant ? fmtPrice(montantNum) : "0 F")}
             </span>
           </div>
@@ -2742,25 +2842,26 @@ function VenteRapide({ T, addSale, flashMsg }) {
       </div>
       
       <div style={{position:"sticky", bottom:0, background:T.bg, padding:"10px 0 0", zIndex:10}}>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6}}>
-          {[7,8,9,4,5,6,1,2,3].map(d=><button key={d} onClick={()=>pushDigit(String(d))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:58, fontSize:24, fontWeight:600, color:T.text}}>{d}</button>)}
-          <button onClick={()=>pushDigit("00")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:58, fontSize:18}}>00</button>
-          <button onClick={()=>pushDigit("0")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:58, fontSize:24}}>0</button>
-          <button onClick={del} style={{background:T.btnRed.bg, border:`1px solid ${T.red}44`, borderRadius:12, height:58, fontSize:20, color:T.red}}>⌫</button>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"clamp(4px,1.5vw,6px)"}}>
+          {[7,8,9,4,5,6,1,2,3].map(d=><button key={d} onClick={()=>pushDigit(String(d))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(18px,5.5vw,24px)", fontWeight:600, color:T.text}}>{d}</button>)}
+          <button onClick={()=>pushDigit("00")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(14px,4vw,18px)", color:T.text}}>00</button>
+          <button onClick={()=>pushDigit("0")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(18px,5.5vw,24px)", color:T.text}}>0</button>
+          <button onClick={del} style={{background:T.btnRed.bg, border:`1px solid ${T.red}44`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(16px,4.5vw,20px)", color:T.red}}>⌫</button>
         </div>
         
         {!modeMonnaie ? (
           <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
-            <button onClick={reset} style={{background:"transparent", border:`1px solid ${T.red}44`, borderRadius:12, padding:12, color:T.red, fontWeight:600}}>✕ Annuler</button>
-            <button onClick={ajouterLigne} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:12, color:T.blue, fontWeight:700}}>➕ Ajouter ligne</button>
-            <button onClick={()=>{ if(lines.length) setModeMonnaie(true); else flashMsg("Ajoutez des lignes d'abord"); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:12, fontWeight:600}}>💵 Monnaie</button>
-            <button onClick={()=>valider(true)} style={{background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800}}>🖨️ Valider</button>
+            <button onClick={reset} style={{background:"transparent", border:`1px solid ${T.red}44`, borderRadius:12, padding:"10px 6px", color:T.red, fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>✕ Annuler</button>
+            <button onClick={ajouterLigne} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,3.2vw,13px)"}}>➕ Ajouter ligne</button>
+            <button onClick={()=>{ if(lines.length) setModeMonnaie(true); else flashMsg("Ajoutez des lignes d'abord"); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>💵 Monnaie</button>
+            <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,3.2vw,13px)"}}>✅ Sans ticket</button>
+            <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3.8vw,15px)"}}>🖨️ Valider et imprimer</button>
           </div>
         ) : (
           <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
-            <button onClick={()=>{ setModeMonnaie(false); setRecu(""); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:12}}>← Retour</button>
-            <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:12, color:T.blue, fontWeight:600}}>✅ Sans ticket</button>
-            <button onClick={()=>valider(true)} style={{background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800}}>🖨️ Imprimer</button>
+            <button onClick={()=>{ setModeMonnaie(false); setRecu(""); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontSize:"clamp(11px,3.2vw,13px)"}}>← Retour</button>
+            <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>✅ Sans ticket</button>
+            <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3.8vw,15px)"}}>🖨️ Imprimer</button>
           </div>
         )}
         {/* Spacer FAB mobile */}
@@ -2807,6 +2908,11 @@ function App() {
   const [devPin, setDevPin] = useState("");
   const [devPinError, setDevPinError] = useState(false);
   const [devPinShake, setDevPinShake] = useState(false);
+  const [adminPinMode, setAdminPinMode] = useState(false);
+  const [adminPin, setAdminPin] = useState("");
+  const [adminPinError, setAdminPinError] = useState(false);
+  const [adminPinShake, setAdminPinShake] = useState(false);
+  const [adminPinLoading, setAdminPinLoading] = useState(false);
   const clickCountRef = useRef({ count: 0, timer: null });
   
   const flashMsg = (msg) => { setFlash(msg); setTimeout(()=>setFlash(null),2500); };
@@ -2836,6 +2942,49 @@ function App() {
       setDevPinShake(true);
       setTimeout(() => { setDevPinShake(false); setDevPin(""); setDevPinError(false); }, 700);
     }
+  };
+
+  // ── Connexion via PIN admin (créé depuis Super Admin) ──────────────
+  const failAdminPin = () => {
+    setAdminPinError(true);
+    setAdminPinShake(true);
+    setTimeout(() => { setAdminPinShake(false); setAdminPin(""); setAdminPinError(false); }, 700);
+  };
+
+  const verifyAdminPin = async () => {
+    if (adminPinLoading || !adminPin || !db) return;
+    setAdminPinLoading(true);
+    try {
+      const snap = await db.collection("superadmin").doc("admins").collection("list").get();
+      let found = null;
+      snap.docs.forEach(d => {
+        const data = d.data();
+        if (data.active === false) return;
+        try { if (atob(data.pin || "") === adminPin) found = { id: d.id, ...data }; } catch(e) {}
+      });
+      if (!found) { failAdminPin(); setAdminPinLoading(false); return; }
+      const shopDoc = await db.collection("shops").doc(found.shopId).get();
+      if (!shopDoc.exists) { flashMsg("Commerce introuvable pour cet admin"); failAdminPin(); setAdminPinLoading(false); return; }
+      const data = shopDoc.data();
+      if (data.active === false) { flashMsg("Compte commerce désactivé"); setAdminPinLoading(false); return; }
+      if (data.sessionActive === false) { flashMsg("Session suspendue par l'administrateur — contactez le support"); setAdminPinLoading(false); return; }
+      const newSession = {
+        shopId: shopDoc.id, shopName: data.shopName, shopPhone: data.phone || "",
+        whatsapp: data.whatsapp, ownerName: data.ownerName, plan: data.plan || "mensuel",
+        subscriptionEnd: data.subscriptionEnd, adminPin: data.adminPin || btoa("0000"), isDev: false,
+        shopLogo: data.logoBase64 || null,
+        shopAddress: data.shopAddress || "", shopSlogan: data.shopSlogan || "",
+        gerantPin: data.gerantPin || null,
+        isAdminAccess: true, adminName: found.name
+      };
+      SessionStore.save(newSession);
+      setSession(newSession);
+      setSessionRestored(false);
+      setAdminPinMode(false);
+      setAdminPin("");
+      flashMsg(`✅ Connecté en tant qu'admin (${found.name})`);
+    } catch(e) { flashMsg("Erreur: " + e.message); }
+    setAdminPinLoading(false);
   };
 
   const handleRegister = async () => {
@@ -2956,6 +3105,29 @@ function App() {
     );
   }
 
+  if (adminPinMode) {
+    return (
+      <div style={{minHeight:"100dvh", background:T.bg, display:"flex", alignItems:"center", justifyContent:"center", padding:16, overflowY:"auto"}}>
+        <div style={{maxWidth:400, width:"100%", background:T.surface, borderRadius:32, padding:32, textAlign:"center", border:`1px solid ${T.border}`}}>
+          <div style={{fontSize:48, marginBottom:16}}>🛡️</div>
+          <div style={{fontFamily:"'Outfit'", fontSize:20, fontWeight:800, color:T.purple, marginBottom:4}}>Connexion Admin</div>
+          <div style={{fontSize:11, color:T.textMute, marginBottom:20}}>Entrez le PIN fourni par le Super Admin</div>
+          <div style={{display:"flex", gap:12, justifyContent:"center", marginBottom:24, animation: adminPinShake ? "shake 0.35s ease" : "none", flexWrap:"wrap"}}>
+            {Array(Math.max(6, adminPin.length)).fill(0).map((_,i)=><div key={i} style={{width:16,height:16,borderRadius:"50%", background: i < adminPin.length ? (adminPinError ? T.red : T.accent) : T.border}} />)}
+          </div>
+          {adminPinError && <div style={{fontSize:12, color:T.red, marginBottom:16}}>✗ PIN incorrect ou admin désactivé</div>}
+          <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10}}>
+            {[1,2,3,4,5,6,7,8,9,"",0,"⌫"].map((d,i)=>(
+              <button key={i} onClick={()=>{ if(d==="⌫") setAdminPin(p=>p.slice(0,-1)); else if(d!=="") setAdminPin(p=>p.length<6 ? p+d : p); }} style={{background:d===""?"transparent":T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:60, fontSize:22, color:d==="⌫"?T.red:T.text}}>{d}</button>
+            ))}
+          </div>
+          <button onClick={verifyAdminPin} disabled={adminPinLoading || adminPin.length<4} style={{marginTop:20, background:T.accent, border:"none", borderRadius:12, padding:12, width:"100%", fontWeight:700, color:T.bg, opacity:(adminPinLoading || adminPin.length<4)?0.6:1}}>{adminPinLoading ? "..." : "Valider"}</button>
+          <button onClick={()=>{setAdminPinMode(false); setAdminPin(""); setAdminPinError(false);}} style={{marginTop:12, background:"transparent", border:"none", color:T.textMute, fontSize:12}}>← Retour</button>
+        </div>
+      </div>
+    );
+  }
+
   if(!session) {
     return (
       <div style={{minHeight:"100dvh", background:T.bg, display:"flex", alignItems:"center", justifyContent:"center", padding:16, overflowY:"auto"}}>
@@ -2977,6 +3149,7 @@ function App() {
             {authMode==="register" && <input type="password" placeholder="Confirmer" value={authConfirm} onChange={e=>setAuthConfirm(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} />}
             {authError && <div style={{fontSize:12, color:T.red, textAlign:"center"}}>{authError}</div>}
             <button onClick={authMode==="register"?handleRegister:handleLogin} disabled={authLoading} style={{background:T.accent, border:"none", borderRadius:16, padding:"16px", fontWeight:800, fontSize:16, color:T.bg}}>{authLoading ? "..." : (authMode==="register" ? "Créer" : "Se connecter")}</button>
+            {authMode==="login" && <button onClick={()=>{setAdminPinMode(true); setAdminPin(""); setAdminPinError(false);}} style={{background:"transparent", border:"none", color:T.purple, fontSize:12, fontWeight:600, padding:"4px"}}>🛡️ Connexion Admin (PIN)</button>}
           </div>
         </div>
       </div>
@@ -5819,7 +5992,8 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
 function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
   const [shops, setShops] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [editingPlan, setEditingPlan] = useState(null);
+  const [planModalShop, setPlanModalShop] = useState(null);
+  const [planForm, setPlanForm] = useState({ plan: "mensuel", customMode: "days", customDays: "", customDate: "", from: "today" });
   
   useEffect(() => {
     if(!db) return;
@@ -5827,14 +6001,35 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
     return unsub;
   }, []);
   
-  const updateSubscription = async (shopId, newPlan) => {
-    const shop = shops.find(s => s.id === shopId);
+  const openPlanModal = (shop) => {
+    setPlanModalShop(shop);
+    setPlanForm({ plan: shop.plan || "mensuel", customMode: "days", customDays: "", customDate: "", from: "today" });
+  };
+
+  const previewNewEnd = (shop, form) => {
+    if(!shop) return null;
+    const base = form.from === "extend" && shop.subscriptionEnd && shop.subscriptionEnd > Date.now() ? shop.subscriptionEnd : Date.now();
+    if(form.plan === "personnalise") {
+      if(form.customMode === "date") {
+        if(!form.customDate) return null;
+        return new Date(form.customDate + "T23:59:59").getTime();
+      }
+      const days = parseInt(form.customDays) || 0;
+      if(days <= 0) return null;
+      return calculateEndDateDays(base, days);
+    }
+    return calculateEndDate(base, form.plan);
+  };
+
+  const confirmPlanChange = async () => {
+    const shop = planModalShop;
     if(!shop) return;
-    const now = Date.now();
-    const newEnd = calculateEndDate(now, newPlan);
-    await db.collection("shops").doc(shopId).update({ plan: newPlan, subscriptionStart: now, subscriptionEnd: newEnd });
-    flashMsg(`Abonnement ${shop.shopName} mis à jour : ${newPlan}`);
-    setEditingPlan(null);
+    const newEnd = previewNewEnd(shop, planForm);
+    if(!newEnd) { flashMsg(planForm.customMode === "date" ? "Choisissez une date" : "Entrez un nombre de jours valide"); return; }
+    const base = planForm.from === "extend" && shop.subscriptionEnd && shop.subscriptionEnd > Date.now() ? shop.subscriptionEnd : Date.now();
+    await db.collection("shops").doc(shop.id).update({ plan: planForm.plan, subscriptionStart: base, subscriptionEnd: newEnd });
+    flashMsg(`Abonnement ${shop.shopName} mis à jour : ${planLabel(planForm.plan)}`);
+    setPlanModalShop(null);
   };
   
   const sendReminder = async (shop) => {
@@ -5850,6 +6045,7 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
     if(plan === "mensuel") return T.blue;
     if(plan === "trimestriel") return T.orange;
     if(plan === "annuel") return T.green;
+    if(plan === "personnalise") return T.purple;
     return T.textMute;
   };
   
@@ -5906,12 +6102,7 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
                   </div>
                 </div>
                 <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>
-                  <select value={editingPlan === shop.id ? editingPlan : ""} onChange={e => { if(e.target.value) updateSubscription(shop.id, e.target.value); else setEditingPlan(null); }} style={{background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:8, padding:"6px 10px", fontSize:11, color:T.text}}>
-                    <option value="">Changer plan</option>
-                    <option value="mensuel">📅 Mensuel (30j)</option>
-                    <option value="trimestriel">📆 Trimestriel (90j)</option>
-                    <option value="annuel">🗓️ Annuel (365j)</option>
-                  </select>
+                  <button onClick={()=>openPlanModal(shop)} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"6px 12px", fontSize:11, fontWeight:600, color:T.text}}>📝 Gérer abonnement</button>
                   <button onClick={()=>sendReminder(shop)} style={{background:T.btnBlue.bg, border:"none", borderRadius:8, padding:"6px 12px", fontSize:11, color:T.blue}}>📱 Rappel</button>
                   <button onClick={()=>toggleShop(shop)} style={{background:shop.active?T.btnRed.bg:T.btnGreen.bg, border:"none", borderRadius:8, padding:"6px 12px", fontSize:11, color:shop.active?T.red:T.green}}>{shop.active?"🔒 Suspendre":"✅ Activer"}</button>
                 </div>
@@ -5920,6 +6111,64 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
           );
         })}
       </div>
+      {planModalShop && (() => {
+        const shop = planModalShop;
+        const preview = previewNewEnd(shop, planForm);
+        const canExtend = shop.subscriptionEnd && shop.subscriptionEnd > Date.now();
+        const PLAN_OPTS = [["mensuel","📅 Mensuel","30 jours"],["trimestriel","📆 Trimestriel","90 jours"],["annuel","🗓️ Annuel","365 jours"],["personnalise","✏️ Personnalisé","jours libres ou date"]];
+        return (
+          <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:16}}>
+            <div style={{background:T.surface, borderRadius:24, padding:20, width:"100%", maxWidth:380, maxHeight:"90vh", overflowY:"auto"}}>
+              <div style={{fontSize:16, fontWeight:800, marginBottom:2}}>📝 Gérer l'abonnement</div>
+              <div style={{fontSize:11, color:T.textMute, marginBottom:14}}>{shop.shopName} · actuellement {planLabel(shop.plan)}{shop.subscriptionEnd ? ` (expire le ${formatDate(shop.subscriptionEnd)})` : ""}</div>
+
+              <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Plan</div>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14}}>
+                {PLAN_OPTS.map(([val,lbl,sub])=>(
+                  <button key={val} onClick={()=>setPlanForm(f=>({...f, plan:val}))} style={{background:planForm.plan===val?T.accent:T.surface2, border:`1px solid ${planForm.plan===val?T.accent:T.border}`, borderRadius:12, padding:"10px 8px", textAlign:"left"}}>
+                    <div style={{fontWeight:700, fontSize:12, color:planForm.plan===val?T.bg:T.text}}>{lbl}</div>
+                    <div style={{fontSize:9, color:planForm.plan===val?T.bg:T.textMute}}>{sub}</div>
+                  </button>
+                ))}
+              </div>
+
+              {planForm.plan === "personnalise" && (
+                <div style={{marginBottom:14}}>
+                  <div style={{display:"flex", gap:6, marginBottom:8}}>
+                    <button onClick={()=>setPlanForm(f=>({...f, customMode:"days"}))} style={{flex:1, background:planForm.customMode==="days"?T.btnBlue.bg:T.surface2, border:`1px solid ${planForm.customMode==="days"?T.blue:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.customMode==="days"?T.blue:T.textMute}}>🔢 Nombre de jours</button>
+                    <button onClick={()=>setPlanForm(f=>({...f, customMode:"date"}))} style={{flex:1, background:planForm.customMode==="date"?T.btnBlue.bg:T.surface2, border:`1px solid ${planForm.customMode==="date"?T.blue:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.customMode==="date"?T.blue:T.textMute}}>📆 Date précise</button>
+                  </div>
+                  {planForm.customMode === "days" ? (
+                    <input type="number" min="1" placeholder="Ex: 45" value={planForm.customDays} onChange={e=>setPlanForm(f=>({...f, customDays:e.target.value}))} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:10, color:T.text}} />
+                  ) : (
+                    <input type="date" value={planForm.customDate} onChange={e=>setPlanForm(f=>({...f, customDate:e.target.value}))} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:10, color:T.text}} />
+                  )}
+                </div>
+              )}
+
+              {(planForm.plan !== "personnalise" || planForm.customMode === "days") && (
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:11, color:T.textMute, marginBottom:6}}>Point de départ</div>
+                  <div style={{display:"flex", gap:6}}>
+                    <button onClick={()=>setPlanForm(f=>({...f, from:"today"}))} style={{flex:1, background:planForm.from==="today"?T.accent:T.surface2, border:`1px solid ${planForm.from==="today"?T.accent:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.from==="today"?T.bg:T.textMute}}>À partir d'aujourd'hui</button>
+                    <button disabled={!canExtend} onClick={()=>setPlanForm(f=>({...f, from:"extend"}))} style={{flex:1, opacity:canExtend?1:0.4, background:planForm.from==="extend"?T.accent:T.surface2, border:`1px solid ${planForm.from==="extend"?T.accent:T.border}`, borderRadius:10, padding:8, fontSize:11, fontWeight:600, color:planForm.from==="extend"?T.bg:T.textMute}}>Prolonger depuis l'expiration</button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:16, textAlign:"center"}}>
+                <div style={{fontSize:10, color:T.textMute}}>Nouvelle date d'expiration</div>
+                <div style={{fontSize:18, fontWeight:800, color:preview?T.accent:T.textMute}}>{preview ? formatDate(preview) : "—"}</div>
+              </div>
+
+              <div style={{display:"flex", gap:8}}>
+                <button onClick={()=>setPlanModalShop(null)} style={{flex:1, background:T.surface2, borderRadius:12, padding:12}}>Annuler</button>
+                <button onClick={confirmPlanChange} style={{flex:1, background:T.accent, borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Valider</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
