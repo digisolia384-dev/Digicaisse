@@ -95,6 +95,11 @@ div,span,input,textarea,button,label{transition:background .22s ease,border-colo
   .mobile-cart-overlay { display: none !important; }
 }
 .mobile-cart-fab { display: none; }
+/* ── Vente Rapide : empilé par défaut (mobile portrait), côte-à-côte dès que la largeur le permet (PC/paysage) ── */
+.vr-layout { flex-direction: column; }
+@media (min-width: 640px) {
+  .vr-layout { flex-direction: row; }
+}
 </style>
 </head>
 <body>
@@ -2777,96 +2782,100 @@ function VenteRapide({ T, addSale, flashMsg }) {
   };
   
   return (
-    <div style={{display:"flex", flexDirection:"column", width:"100%", maxWidth:480, margin:"0 auto", boxSizing:"border-box"}}>
-      <div style={{padding:"0 0 4px"}}>
-        <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12, border:`2px solid ${modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.border)}`}}>
-          {!modeMonnaie && (
-            <>
-              <input placeholder="Libellé (optionnel)" value={label} onChange={e=>setLabel(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, marginBottom:6, color:T.text}} />
-              <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
-                {QUICK_LABELS.map(l=>(
-                  <button key={l} onClick={()=>setLabel(l)} style={{background:label===l?T.accent:T.surface2, border:`1px solid ${label===l?T.accent:T.border}`, borderRadius:8, padding:"3px 8px", fontSize:10, color:label===l?T.bg:T.textMute}}>{l}</button>
-                ))}
-              </div>
-              {montantHistory.length > 0 && montant === "" && (
-                <div style={{marginBottom:8}}>
-                  <div style={{fontSize:9, color:T.textMute, marginBottom:4}}>🕐 Récents :</div>
-                  <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
-                    {montantHistory.slice(0,6).map(h=>(
-                      <button key={h} onClick={()=>setMontant(String(h))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"3px 8px", fontSize:10, fontWeight:600}}>{fmtPrice(h)}</button>
-                    ))}
+    <div className="vr-root" style={{display:"flex", flexDirection:"column", width:"100%", maxWidth:900, margin:"0 auto", boxSizing:"border-box"}}>
+      <div className="vr-layout" style={{display:"flex", gap:16, alignItems:"flex-start"}}>
+        <div className="vr-left" style={{flex:"1 1 340px", minWidth:0}}>
+          <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12, border:`2px solid ${modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.border)}`}}>
+            {!modeMonnaie && (
+              <>
+                <input placeholder="Libellé (optionnel)" value={label} onChange={e=>setLabel(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:10, padding:10, marginBottom:6, color:T.text}} />
+                <div style={{display:"flex", gap:4, flexWrap:"wrap", marginBottom:8}}>
+                  {QUICK_LABELS.map(l=>(
+                    <button key={l} onClick={()=>setLabel(l)} style={{background:label===l?T.accent:T.surface2, border:`1px solid ${label===l?T.accent:T.border}`, borderRadius:8, padding:"3px 8px", fontSize:10, color:label===l?T.bg:T.textMute}}>{l}</button>
+                  ))}
+                </div>
+                {montantHistory.length > 0 && montant === "" && (
+                  <div style={{marginBottom:8}}>
+                    <div style={{fontSize:9, color:T.textMute, marginBottom:4}}>🕐 Récents :</div>
+                    <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
+                      {montantHistory.slice(0,6).map(h=>(
+                        <button key={h} onClick={()=>setMontant(String(h))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"3px 8px", fontSize:10, fontWeight:600}}>{fmtPrice(h)}</button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
-            </>
-          )}
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:8}}>
-            <span style={{fontSize:11, color:T.textMute, flexShrink:0}}>{modeMonnaie ? "Montant reçu" : "Montant"}</span>
-            <span style={{fontSize:"clamp(24px,8vw,36px)", fontWeight:800, color:modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.textMute), overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
-              {modeMonnaie ? (recu ? fmtPrice(recuNum) : "—") : (montant ? fmtPrice(montantNum) : "0 F")}
-            </span>
-          </div>
-        </div>
-        
-        {modeMonnaie && (
-          <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginBottom:12}}>
-            {BILLS.map(b=><button key={b} onClick={()=>setRecu(String(b))} style={{background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:12, fontWeight:700}}>{b>=1000?(b/1000)+"k":b}</button>)}
-          </div>
-        )}
-        
-        {lines.length > 0 && (
-          <div style={{marginBottom:12}}>
-            <div style={{fontSize:10, color:T.textMute, marginBottom:6}}>Lignes ({lines.length})</div>
-            {lines.map((l,idx)=>(
-              <div key={l.id} style={{background:T.surface2, borderRadius:10, padding:10, marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-                <div><span style={{color:T.textMute, marginRight:8}}>{idx+1}.</span><span>{l.label}</span></div>
-                <div style={{display:"flex", alignItems:"center", gap:10}}>
-                  <span style={{fontWeight:700, color:T.accent}}>{fmtPrice(l.montant)}</span>
-                  {!modeMonnaie && <button onClick={()=>supprimerLigne(l.id)} style={{background:T.btnRed.bg, border:"none", borderRadius:6, width:28, height:28, color:T.red, fontSize:16}}>×</button>}
-                </div>
-              </div>
-            ))}
-            <div style={{background:T.btnGreen.bg, borderRadius:12, padding:12, marginTop:6, display:"flex", justifyContent:"space-between", border:`1px solid ${T.green}`}}>
-              <span style={{fontWeight:700}}>TOTAL</span>
-              <span style={{fontSize:20, fontWeight:800, color:T.green}}>{fmtPrice(totalLines)}</span>
+                )}
+              </>
+            )}
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:8}}>
+              <span style={{fontSize:11, color:T.textMute, flexShrink:0}}>{modeMonnaie ? "Montant reçu" : "Montant"}</span>
+              <span style={{fontSize:"clamp(22px,min(8vw,5vh),36px)", fontWeight:800, color:modeMonnaie ? T.blue : (montantNum>0 ? T.accent : T.textMute), overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                {modeMonnaie ? (recu ? fmtPrice(recuNum) : "—") : (montant ? fmtPrice(montantNum) : "0 F")}
+              </span>
             </div>
           </div>
-        )}
-        
-        {modeMonnaie && recuNum > 0 && (
-          <div style={{background:monnaie>=0 ? T.btnGreen.bg : T.btnRed.bg, borderRadius:12, padding:16, textAlign:"center", marginBottom:12}}>
-            <div style={{fontSize:11, color:T.textMute}}>Monnaie à rendre</div>
-            <div style={{fontSize:32, fontWeight:800, color:monnaie>=0 ? T.green : T.red}}>{monnaie>=0 ? fmtPrice(monnaie) : `-${fmtPrice(Math.abs(monnaie))}`}</div>
-          </div>
-        )}
-      </div>
-      
-      <div style={{position:"sticky", bottom:0, background:T.bg, padding:"10px 0 0", zIndex:10}}>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"clamp(4px,1.5vw,6px)"}}>
-          {[7,8,9,4,5,6,1,2,3].map(d=><button key={d} onClick={()=>pushDigit(String(d))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(18px,5.5vw,24px)", fontWeight:600, color:T.text}}>{d}</button>)}
-          <button onClick={()=>pushDigit("00")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(14px,4vw,18px)", color:T.text}}>00</button>
-          <button onClick={()=>pushDigit("0")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(18px,5.5vw,24px)", color:T.text}}>0</button>
-          <button onClick={del} style={{background:T.btnRed.bg, border:`1px solid ${T.red}44`, borderRadius:12, height:"clamp(46px,13vw,58px)", fontSize:"clamp(16px,4.5vw,20px)", color:T.red}}>⌫</button>
+
+          {modeMonnaie && (
+            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginBottom:12}}>
+              {BILLS.map(b=><button key={b} onClick={()=>setRecu(String(b))} style={{background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:12, fontWeight:700}}>{b>=1000?(b/1000)+"k":b}</button>)}
+            </div>
+          )}
+
+          {lines.length > 0 && (
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:10, color:T.textMute, marginBottom:6}}>Lignes ({lines.length})</div>
+              <div style={{maxHeight:"clamp(120px,30vh,260px)", overflowY:"auto"}}>
+                {lines.map((l,idx)=>(
+                  <div key={l.id} style={{background:T.surface2, borderRadius:10, padding:10, marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                    <div><span style={{color:T.textMute, marginRight:8}}>{idx+1}.</span><span>{l.label}</span></div>
+                    <div style={{display:"flex", alignItems:"center", gap:10}}>
+                      <span style={{fontWeight:700, color:T.accent}}>{fmtPrice(l.montant)}</span>
+                      {!modeMonnaie && <button onClick={()=>supprimerLigne(l.id)} style={{background:T.btnRed.bg, border:"none", borderRadius:6, width:28, height:28, color:T.red, fontSize:16, flexShrink:0}}>×</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:T.btnGreen.bg, borderRadius:12, padding:12, marginTop:6, display:"flex", justifyContent:"space-between", border:`1px solid ${T.green}`}}>
+                <span style={{fontWeight:700}}>TOTAL</span>
+                <span style={{fontSize:20, fontWeight:800, color:T.green}}>{fmtPrice(totalLines)}</span>
+              </div>
+            </div>
+          )}
+
+          {modeMonnaie && recuNum > 0 && (
+            <div style={{background:monnaie>=0 ? T.btnGreen.bg : T.btnRed.bg, borderRadius:12, padding:16, textAlign:"center", marginBottom:12}}>
+              <div style={{fontSize:11, color:T.textMute}}>Monnaie à rendre</div>
+              <div style={{fontSize:32, fontWeight:800, color:monnaie>=0 ? T.green : T.red}}>{monnaie>=0 ? fmtPrice(monnaie) : `-${fmtPrice(Math.abs(monnaie))}`}</div>
+            </div>
+          )}
         </div>
-        
-        {!modeMonnaie ? (
-          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
-            <button onClick={reset} style={{background:"transparent", border:`1px solid ${T.red}44`, borderRadius:12, padding:"10px 6px", color:T.red, fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>✕ Annuler</button>
-            <button onClick={ajouterLigne} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,3.2vw,13px)"}}>➕ Ajouter ligne</button>
-            <button onClick={()=>{ if(lines.length) setModeMonnaie(true); else flashMsg("Ajoutez des lignes d'abord"); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>💵 Monnaie</button>
-            <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,3.2vw,13px)"}}>✅ Sans ticket</button>
-            <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3.8vw,15px)"}}>🖨️ Valider et imprimer</button>
+
+        <div className="vr-right" style={{flex:"1 1 260px", minWidth:0, background:T.bg}}>
+          <div className="vr-numpad" style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"clamp(4px,1vw,6px)"}}>
+            {[7,8,9,4,5,6,1,2,3].map(d=><button key={d} className="vr-numkey" onClick={()=>pushDigit(String(d))} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(38px,min(11vw,8vh),56px)", fontSize:"clamp(16px,min(5vw,3.4vh),22px)", fontWeight:600, color:T.text}}>{d}</button>)}
+            <button className="vr-numkey" onClick={()=>pushDigit("00")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(38px,min(11vw,8vh),56px)", fontSize:"clamp(13px,min(3.6vw,2.6vh),17px)", color:T.text}}>00</button>
+            <button className="vr-numkey" onClick={()=>pushDigit("0")} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, height:"clamp(38px,min(11vw,8vh),56px)", fontSize:"clamp(16px,min(5vw,3.4vh),22px)", color:T.text}}>0</button>
+            <button className="vr-numkey" onClick={del} style={{background:T.btnRed.bg, border:`1px solid ${T.red}44`, borderRadius:12, height:"clamp(38px,min(11vw,8vh),56px)", fontSize:"clamp(14px,min(4vw,2.8vh),19px)", color:T.red}}>⌫</button>
           </div>
-        ) : (
-          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
-            <button onClick={()=>{ setModeMonnaie(false); setRecu(""); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontSize:"clamp(11px,3.2vw,13px)"}}>← Retour</button>
-            <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:600, fontSize:"clamp(11px,3.2vw,13px)"}}>✅ Sans ticket</button>
-            <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3.8vw,15px)"}}>🖨️ Imprimer</button>
-          </div>
-        )}
-        {/* Spacer FAB mobile */}
-        <div style={{height:80}} />
+
+          {!modeMonnaie ? (
+            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
+              <button onClick={reset} style={{background:"transparent", border:`1px solid ${T.red}44`, borderRadius:12, padding:"10px 6px", color:T.red, fontWeight:600, fontSize:"clamp(11px,2.6vw,13px)"}}>✕ Annuler</button>
+              <button onClick={ajouterLigne} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,2.6vw,13px)"}}>➕ Ajouter ligne</button>
+              <button onClick={()=>{ if(lines.length) setModeMonnaie(true); else flashMsg("Ajoutez des lignes d'abord"); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontWeight:600, fontSize:"clamp(11px,2.6vw,13px)"}}>💵 Monnaie</button>
+              <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:700, fontSize:"clamp(11px,2.6vw,13px)"}}>✅ Sans ticket</button>
+              <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3vw,15px)"}}>🖨️ Valider et imprimer</button>
+            </div>
+          ) : (
+            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:8}}>
+              <button onClick={()=>{ setModeMonnaie(false); setRecu(""); }} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", fontSize:"clamp(11px,2.6vw,13px)"}}>← Retour</button>
+              <button onClick={()=>valider(false)} style={{background:T.btnBlue.bg, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 6px", color:T.blue, fontWeight:600, fontSize:"clamp(11px,2.6vw,13px)"}}>✅ Sans ticket</button>
+              <button onClick={()=>valider(true)} style={{gridColumn:"1 / -1", background:T.btnGreen.bg, border:`2px solid ${T.green}`, borderRadius:12, padding:12, color:T.green, fontWeight:800, fontSize:"clamp(13px,3vw,15px)"}}>🖨️ Imprimer</button>
+            </div>
+          )}
+        </div>
       </div>
+      {/* Spacer FAB mobile */}
+      <div style={{height:80}} />
     </div>
   );
 }
