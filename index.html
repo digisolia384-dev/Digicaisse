@@ -337,7 +337,7 @@ async function logoToESCPOS(base64, maxWidth) {
   });
 }
 
-function syncShopData(shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers) {
+function syncShopData(shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers, setCommandes) {
   if(!db) return ()=>{};
   const unsubProds = db.collection("shops").doc(shopId).collection("products").onSnapshot(snap => {
     const prods = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(p => p.id !== "_init");
@@ -364,7 +364,12 @@ function syncShopData(shopId, setProducts, setSales, setStockMovements, setCredi
     OfflineStore.set(shopId, "caissiers", caissiers);
     setCaissiers && setCaissiers(caissiers);
   });
-  return () => { unsubProds(); unsubSales(); unsubMovements(); unsubCredits(); unsubCaissiers(); };
+  const unsubCommandes = db.collection("shops").doc(shopId).collection("commandes").onSnapshot(snap => {
+    const commandes = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    OfflineStore.set(shopId, "commandes", commandes);
+    setCommandes && setCommandes(commandes);
+  });
+  return () => { unsubProds(); unsubSales(); unsubMovements(); unsubCredits(); unsubCaissiers(); unsubCommandes(); };
 }
 
 // ── Helpers export CSV ────────────────────────────────────────────────
@@ -2589,6 +2594,145 @@ function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketForm
 }
 
 // ══════════════════════════════════════════════════════════════════
+//  IMPRESSION — BON DE COMMANDE GÉRANT (avec suivi reliquat)
+// ══════════════════════════════════════════════════════════════════
+async function buildCommandeESCPOS(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, col, ticketFooter) {
+  const C = col || COL_80;
+  const is80 = C >= COL_80;
+  const buf = [];
+  const push = (arr) => buf.push(...arr);
+  const text = (str) => {
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if (code >= 32 && code <= 126) buf.push(code);
+      else if (code === 0xE9 || code === 0xE8 || code === 0xEA) buf.push(0x65);
+      else if (code === 0xE0 || code === 0xE2) buf.push(0x61);
+      else if (code === 0xF9 || code === 0xFB) buf.push(0x75);
+      else if (code === 0xE7) buf.push(0x63);
+      else if (code === 0xEE) buf.push(0x69);
+      else if (code === 0xF4) buf.push(0x6F);
+      else buf.push(0x20);
+    }
+  };
+  const line = (str) => { text(str); push([LF]); };
+  const emptyLine = () => push([LF]);
+  const sizeNormal  = () => push([GS, 0x21, 0x00]);
+  const sizeMedium  = () => push([GS, 0x21, 0x11]);
+  const boldOn      = () => push([ESC, 0x45, 0x01]);
+  const boldOff     = () => push([ESC, 0x45, 0x00]);
+  const alignCenter = () => push([ESC, 0x61, 0x01]);
+  const alignLeft   = () => push([ESC, 0x61, 0x00]);
+
+  push([ESC, 0x40]);
+  push([ESC, 0x74, 0x00]);
+
+  alignCenter();
+  if (shopLogo) {
+    try { const maxPx = is80 ? 512 : 384; push(await logoToESCPOS(shopLogo, maxPx)); emptyLine(); } catch(e) {}
+  }
+
+  alignCenter(); boldOn();
+  push([GS, 0x21, is80 ? 0x11 : 0x10]);
+  line(shopName.toUpperCase().slice(0, is80 ? 20 : 16));
+  boldOff(); sizeNormal();
+  if (shopAddress) { alignCenter(); line(shopAddress.slice(0, C)); }
+  if (shopPhone)   { alignCenter(); line("Tel: " + shopPhone); }
+  if (shopSlogan)  { alignCenter(); line(shopSlogan.slice(0, C)); }
+
+  const d = new Date();
+  const dateStr = `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+  alignCenter();
+  line("BON DE COMMANDE");
+  line("Date: " + dateStr);
+
+  alignLeft(); sizeNormal();
+  line("=".repeat(C));
+  line("Client: " + `${commande.prenom} ${commande.nom}`);
+  line("Tel: " + commande.telephone);
+  line("Articles: " + commande.nbArticles);
+  line("-".repeat(C));
+  boldOn(); line("TOTAL A PAYER: " + fmtPrice(commande.total)); boldOff();
+  line("VERSE: " + fmtPrice(commande.paidAmount || 0));
+  boldOn(); line("RESTE A PAYER: " + fmtPrice(Math.max(0, commande.total - (commande.paidAmount||0)))); boldOff();
+  line("=".repeat(C));
+
+  emptyLine();
+  alignCenter();
+  const piedLines = (ticketFooter || "Merci pour votre confiance !\n--- Digitale Solution ---").split("\n").map(l=>l.trim()).filter(Boolean);
+  piedLines.forEach(l => line(l.slice(0, C)));
+
+  push([ESC, 0x64, 0x05]);
+  push([GS, 0x56, 0x41, 0x03]);
+  return new Uint8Array(buf);
+}
+
+async function printCommandeViaBLE(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter) {
+  if (!printer.connected) throw new Error("Imprimante non connectée");
+  const col = ticketFormat === "57mm" ? COL_57 : COL_80;
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  const ticket = await buildCommandeESCPOS(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, col, ticketFooter);
+  for (let i = 0; i < copies; i++) {
+    await printer.print(ticket);
+    if (i < copies - 1) await new Promise(r => setTimeout(r, 600));
+  }
+  return true;
+}
+
+function printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter) {
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  const w = ticketFormat === "57mm" ? "58mm" : "80mm";
+  const reste = Math.max(0, commande.total - (commande.paidAmount||0));
+  const piedLines = (ticketFooter || "Merci pour votre confiance !\n--- Digitale Solution ---").split("\n").map(l=>l.trim()).filter(Boolean);
+  const buildHtml = () => {
+    let html = `<html><head><meta charset="utf-8"><title>Bon de commande</title><style>
+      @page{size:${w} auto;margin:4mm}
+      body{font-family:'Courier New',monospace;width:${w};margin:0 auto;font-size:${ticketFormat==="57mm"?"11px":"13px"};line-height:1.5}
+      .center{text-align:center} .bold{font-weight:bold}
+      .shop{font-size:${ticketFormat==="57mm"?"14px":"18px"};font-weight:bold;text-align:center;margin:4px 0}
+      .subinfo{font-size:${ticketFormat==="57mm"?"10px":"12px"};text-align:center;margin:1px 0}
+      .sep{border:none;border-top:1px dashed #000;margin:6px 0}
+      .row{display:flex;justify-content:space-between;margin:3px 0}
+      .total-row{display:flex;justify-content:space-between;font-size:${ticketFormat==="57mm"?"15px":"18px"};font-weight:bold;padding:4px 0}
+      .footer{text-align:center;margin-top:6px;font-size:11px}
+    </style></head><body>`;
+    if(shopLogo) html += `<div class="center"><img src="${shopLogo}" style="max-width:${ticketFormat==="57mm"?120:180}px;max-height:60px;margin:0 auto 6px;display:block;" /></div>`;
+    html += `<div class="shop">${shopName.toUpperCase()}</div>`;
+    if(shopAddress) html += `<div class="subinfo">${shopAddress}</div>`;
+    if(shopPhone) html += `<div class="subinfo">Tel: ${shopPhone}</div>`;
+    if(shopSlogan) html += `<div class="subinfo"><em>${shopSlogan}</em></div>`;
+    html += `<div class="center">BON DE COMMANDE</div>`;
+    html += `<div class="center">${new Date().toLocaleString('fr-FR')}</div>`;
+    html += `<hr class="sep">`;
+    html += `<div class="row"><span>Client</span><span><b>${commande.prenom} ${commande.nom}</b></span></div>`;
+    html += `<div class="row"><span>Téléphone</span><span>${commande.telephone}</span></div>`;
+    html += `<div class="row"><span>Articles</span><span>${commande.nbArticles}</span></div>`;
+    html += `<hr class="sep">`;
+    html += `<div class="total-row"><span>TOTAL</span><span>${fmtPrice(commande.total)}</span></div>`;
+    html += `<div class="row"><span>Versé</span><span>${fmtPrice(commande.paidAmount||0)}</span></div>`;
+    html += `<div class="row" style="font-weight:bold;color:${reste>0?'#c0392b':'#1f9d55'}"><span>RESTE À PAYER</span><span>${fmtPrice(reste)}</span></div>`;
+    html += `<hr class="sep">`;
+    html += `<div class="footer">${piedLines.map(l=>`<div>${l}</div>`).join("")}</div></body></html>`;
+    return html;
+  };
+  const win = window.open("", "_blank", "width=500,height=700");
+  if(win) {
+    let fullHtml = buildHtml();
+    fullHtml = fullHtml.replace('</head>', `<style>@page{size:${w} auto;margin:4mm}</style></head>`);
+    win.document.write(fullHtml);
+    win.document.close();
+    win.onload = () => {
+      for(let i=0;i<copies;i++) win.print();
+      setTimeout(()=>win.close(), 1500 * copies);
+    };
+  }
+}
+
+function buildReliquatWhatsAppMsg(commande, shopName) {
+  const reste = Math.max(0, commande.total - (commande.paidAmount||0));
+  return `Bonjour ${commande.prenom} ${commande.nom}, nous vous rappelons que le solde de votre commande chez ${shopName||"notre boutique"} s'élève à ${fmtPrice(reste)} (Total: ${fmtPrice(commande.total)}, déjà versé: ${fmtPrice(commande.paidAmount||0)}). Merci de bien vouloir régler ce reliquat dès que possible. Cordialement.`;
+}
+
+// ══════════════════════════════════════════════════════════════════
 //  COMPOSANT BANDE D'ABONNEMENT DÉFILANTE
 // ══════════════════════════════════════════════════════════════════
 function SubscriptionBanner({ T, shopId }) {
@@ -3179,6 +3323,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   const [stockMovements, setStockMovements] = useState(() => OfflineStore.get(session.shopId, "stock_movements") || []);
   const [credits, setCredits] = useState(() => OfflineStore.get(session.shopId, "credits") || []);
   const [caissiers, setCaissiers] = useState(() => OfflineStore.get(session.shopId, "caissiers") || []);
+  const [commandes, setCommandes] = useState(() => OfflineStore.get(session.shopId, "commandes") || []);
   const [currentCaissier, setCurrentCaissier] = useState(() => { try { return JSON.parse(sessionStorage.getItem("pos_caissier_"+session.shopId)||"null"); } catch(e){ return null; } });
   const [mode, setMode] = useState("CAISSE");
   const [items, setItems] = useState([]);
@@ -3203,7 +3348,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   // ── Mode PIN (admin ou gérant) ─────────────────────────────────
   const [pinModalTarget, setPinModalTarget] = useState("admin");
 
-  useEffect(() => { const unsub = syncShopData(session.shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers); return unsub; }, [session.shopId]);
+  useEffect(() => { const unsub = syncShopData(session.shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers, setCommandes); return unsub; }, [session.shopId]);
 
   const total = items.reduce((s,i)=>s + (i.amount || 0) * (i.qty || 1), 0);
   
@@ -3308,6 +3453,38 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     OfflineStore.set(session.shopId, "credits", updated);
     if(db) db.collection("shops").doc(session.shopId).collection("credits").doc(creditId).update({paidAmount:newPaid, paid, payments:[...(credit.payments||[]), payment]}).catch(()=>{});
     flashMsg(paid ? `✅ Crédit ${credit.clientName} soldé !` : `💰 Paiement partiel enregistré`);
+  };
+
+  const addCommande = (data) => {
+    const newCommande = {
+      id: Date.now().toString(36)+Math.random().toString(36).slice(2),
+      nom: data.nom, prenom: data.prenom, telephone: data.telephone,
+      nbArticles: data.nbArticles, total: data.total,
+      paidAmount: data.paidAmount || 0,
+      paid: (data.paidAmount||0) >= data.total,
+      date: new Date().toISOString().slice(0,10), timestamp: Date.now(),
+      caissier: currentCaissier?.name || null,
+      payments: (data.paidAmount||0) > 0 ? [{ amount: data.paidAmount, date: new Date().toISOString().slice(0,10), timestamp: Date.now() }] : []
+    };
+    const updated = [...commandes, newCommande];
+    setCommandes(updated);
+    OfflineStore.set(session.shopId, "commandes", updated);
+    if(db) db.collection("shops").doc(session.shopId).collection("commandes").doc(newCommande.id).set(newCommande).catch(()=>{});
+    flashMsg(`📝 Commande enregistrée pour ${data.prenom} ${data.nom}`);
+    return newCommande;
+  };
+
+  const payCommande = async (commandeId, amount) => {
+    const commande = commandes.find(c=>c.id===commandeId);
+    if(!commande) return;
+    const newPaid = (commande.paidAmount||0) + amount;
+    const paid = newPaid >= commande.total;
+    const payment = { amount, date: new Date().toISOString().slice(0,10), timestamp: Date.now() };
+    const updated = commandes.map(c=>c.id===commandeId?{...c, paidAmount:newPaid, paid, payments:[...(c.payments||[]), payment]}:c);
+    setCommandes(updated);
+    OfflineStore.set(session.shopId, "commandes", updated);
+    if(db) db.collection("shops").doc(session.shopId).collection("commandes").doc(commandeId).update({paidAmount:newPaid, paid, payments:[...(commande.payments||[]), payment]}).catch(()=>{});
+    flashMsg(paid ? `✅ Commande de ${commande.prenom} ${commande.nom} soldée !` : `💰 Versement enregistré`);
   };
 
   const loginCaissier = (caissier) => {
@@ -3581,7 +3758,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
         <OwnerContent T={T} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} setShopName={setShopName} setShopPhone={setShopPhone} setShopAddress={setShopAddress} setShopSlogan={setShopSlogan} saveShopInfo={saveShopInfo} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} updateGerantPin={updateGerantPin} session={session} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} ticketFooter={ticketFooter} setTicketFooter={setTicketFooter} />
       )}
       {gerantMode && !ownerMode && (
-        <GerantContent T={T} products={products} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} shopName={shopName} />
+        <GerantContent T={T} products={products} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} shopName={shopName} commandes={commandes} addCommande={addCommande} payCommande={payCommande} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
       )}
     </div>
   );
@@ -5019,7 +5196,7 @@ function SectionVentes({ T, sales, hasBeneficeData }) {
 // ══════════════════════════════════════════════════════════════════
 //  GÉRANT CONTENT — Stats + Stock (sans PIN)
 // ══════════════════════════════════════════════════════════════════
-function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName }) {
+function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName, commandes, addCommande, payCommande, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
   const [tab, setTab] = useState("stats");
 
   // ── Stats du jour ──────────────────────────────────────────────
@@ -5045,7 +5222,7 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
   (sales||[]).filter(s=>!s.cancelled).forEach(s=>(s.items||[]).forEach(it=>{ if(it.label){ prodCount[it.label]=(prodCount[it.label]||0)+(it.qty||1); } }));
   const top5 = Object.entries(prodCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
 
-  const TABS = [["stats","📊 Stats"],["stock","📋 Stock"],["reappro","🔄 Réappro"],["valorisation","💰 Valeur stock"]];
+  const TABS = [["stats","📊 Stats"],["stock","📋 Stock"],["reappro","🔄 Réappro"],["valorisation","💰 Valeur stock"],["commandes","📝 Commandes"]];
 
   return (
     <div style={{flex:1, overflowY:"auto", padding:12}}>
@@ -5192,6 +5369,163 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
       {/* ── VALORISATION STOCK ── */}
       {tab==="valorisation" && (
         <SectionValorisation T={T} products={products} />
+      )}
+
+      {/* ── COMMANDES ── */}
+      {tab==="commandes" && (
+        <CommandesGerant T={T} commandes={commandes} addCommande={addCommande} payCommande={payCommande} flashMsg={flashMsg} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  COMPOSANT COMMANDES — SAISIE, SUIVI RELIQUAT, IMPRESSION, WHATSAPP
+// ══════════════════════════════════════════════════════════════════
+function commInputStyle(T) {
+  return { width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:11, marginBottom:8, color:T.text, fontSize:13, boxSizing:"border-box" };
+}
+
+function CommandesGerant({ T, commandes, addCommande, payCommande, flashMsg, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ nom:"", prenom:"", telephone:"", nbArticles:"", total:"", versement:"" });
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [payModal, setPayModal] = useState(null);
+  const [payAmount, setPayAmount] = useState("");
+
+  const totalNum = parseFloat(form.total) || 0;
+  const versementNum = parseFloat(form.versement) || 0;
+  const resteForm = Math.max(0, totalNum - versementNum);
+
+  const resetForm = () => setForm({ nom:"", prenom:"", telephone:"", nbArticles:"", total:"", versement:"" });
+
+  const handlePrint = (commande) => {
+    try {
+      if (useBLE && typeof printer !== "undefined" && printer.connected) {
+        printCommandeViaBLE(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter)
+          .catch(()=>printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter));
+      } else {
+        printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter);
+      }
+    } catch(e) {
+      printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter);
+    }
+  };
+
+  const handleSendReliquat = (commande) => {
+    const msg = buildReliquatWhatsAppMsg(commande, shopName);
+    const tel = (commande.telephone||"").replace(/\D/g,"");
+    window.open(`https://wa.me/${tel}?text=${encodeURIComponent(msg)}`, "_blank");
+  };
+
+  const handleSubmit = () => {
+    if (!form.nom.trim() || !form.prenom.trim() || !form.telephone.trim()) { flashMsg("⚠️ Nom, prénom et téléphone requis"); return; }
+    if (!form.nbArticles || parseInt(form.nbArticles) <= 0) { flashMsg("⚠️ Nombre d'articles invalide"); return; }
+    if (!totalNum || totalNum <= 0) { flashMsg("⚠️ Total à payer invalide"); return; }
+    if (versementNum > totalNum) { flashMsg("⚠️ Le montant versé dépasse le total"); return; }
+    const commande = addCommande({
+      nom: form.nom.trim(), prenom: form.prenom.trim(), telephone: form.telephone.trim(),
+      nbArticles: parseInt(form.nbArticles), total: totalNum, paidAmount: versementNum
+    });
+    setShowForm(false);
+    resetForm();
+    if (commande) setTimeout(()=>handlePrint(commande), 300);
+  };
+
+  const filtered = (commandes||[]).filter(c => {
+    if (filter==="solde" && !c.paid) return false;
+    if (filter==="partiel" && c.paid) return false;
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      return `${c.nom} ${c.prenom} ${c.telephone}`.toLowerCase().includes(q);
+    }
+    return true;
+  }).sort((a,b)=>b.timestamp-a.timestamp);
+
+  return (
+    <div>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12}}>
+        <div style={{fontSize:13, fontWeight:700}}>📝 Commandes clients</div>
+        <button onClick={()=>setShowForm(true)} style={{background:T.accent, border:"none", borderRadius:10, padding:"8px 14px", fontWeight:700, color:T.bg, fontSize:12}}>+ Nouvelle</button>
+      </div>
+
+      <input placeholder="🔎 Rechercher (nom, prénom, tél.)" value={search} onChange={e=>setSearch(e.target.value)} style={{...commInputStyle(T), marginBottom:8}} />
+
+      <div style={{display:"flex", gap:5, marginBottom:12}}>
+        {[["all","Toutes"],["partiel","🟠 Partielles"],["solde","🟢 Soldées"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setFilter(k)} style={{flex:1, background:filter===k?T.green:T.surface2, border:"none", borderRadius:10, padding:7, fontSize:11, fontWeight:600, color:filter===k?T.bg:T.textMute}}>{l}</button>
+        ))}
+      </div>
+
+      {filtered.length===0 && <div style={{textAlign:"center", padding:24, color:T.textMute, fontSize:12}}>Aucune commande</div>}
+
+      {filtered.map(c => {
+        const reste = Math.max(0, c.total - (c.paidAmount||0));
+        return (
+          <div key={c.id} style={{background:T.surface, borderRadius:14, padding:12, marginBottom:8}}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+              <div>
+                <div style={{fontWeight:700, fontSize:13}}>{c.prenom} {c.nom}</div>
+                <div style={{fontSize:11, color:T.textMute}}>{c.telephone} · {c.nbArticles} article{c.nbArticles>1?"s":""}</div>
+              </div>
+              <div style={{fontSize:10, fontWeight:700, padding:"3px 8px", borderRadius:8, background:c.paid?T.btnGreen.bg:"#f5a62322", color:c.paid?T.green:T.orange, flexShrink:0}}>{c.paid?"🟢 Soldé":"🟠 Partiel"}</div>
+            </div>
+            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6, marginTop:8}}>
+              <div><div style={{fontSize:9, color:T.textMute}}>Total</div><div style={{fontSize:12, fontWeight:700}}>{fmtPrice(c.total)}</div></div>
+              <div><div style={{fontSize:9, color:T.textMute}}>Versé</div><div style={{fontSize:12, fontWeight:700, color:T.green}}>{fmtPrice(c.paidAmount||0)}</div></div>
+              <div><div style={{fontSize:9, color:T.textMute}}>Reste</div><div style={{fontSize:12, fontWeight:700, color:reste>0?T.red:T.green}}>{fmtPrice(reste)}</div></div>
+            </div>
+            <div style={{display:"flex", gap:6, marginTop:10, flexWrap:"wrap"}}>
+              <button onClick={()=>handlePrint(c)} style={{flex:"1 0 auto", background:T.surface2, border:"none", borderRadius:8, padding:"7px 10px", fontSize:11, color:T.text}}>🖨️ Imprimer</button>
+              {reste>0 && <button onClick={()=>handleSendReliquat(c)} style={{flex:"1 0 auto", background:"#25D36622", border:"none", borderRadius:8, padding:"7px 10px", fontSize:11, color:"#25D366", fontWeight:600}}>💬 Rappel</button>}
+              {reste>0 && <button onClick={()=>{setPayModal(c); setPayAmount("");}} style={{flex:"1 0 auto", background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"7px 10px", fontSize:11, color:T.green, fontWeight:600}}>💰 Encaisser</button>}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Modal nouvelle commande */}
+      {showForm && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200, padding:16}}>
+          <div style={{background:T.surface, borderRadius:16, padding:18, width:"100%", maxWidth:380, maxHeight:"88vh", overflowY:"auto"}}>
+            <div style={{fontSize:16, fontWeight:800, marginBottom:12}}>📝 Nouvelle commande</div>
+            <input placeholder="Nom" value={form.nom} onChange={e=>setForm(f=>({...f,nom:e.target.value}))} style={commInputStyle(T)} />
+            <input placeholder="Prénom" value={form.prenom} onChange={e=>setForm(f=>({...f,prenom:e.target.value}))} style={commInputStyle(T)} />
+            <input placeholder="Numéro de téléphone" value={form.telephone} onChange={e=>setForm(f=>({...f,telephone:e.target.value}))} style={commInputStyle(T)} />
+            <input type="number" placeholder="Nombre d'articles commandés" value={form.nbArticles} onChange={e=>setForm(f=>({...f,nbArticles:e.target.value}))} style={commInputStyle(T)} />
+            <input type="number" placeholder="Total à payer (FCFA)" value={form.total} onChange={e=>setForm(f=>({...f,total:e.target.value}))} style={commInputStyle(T)} />
+            <input type="number" placeholder="Montant versé (FCFA)" value={form.versement} onChange={e=>setForm(f=>({...f,versement:e.target.value}))} style={commInputStyle(T)} />
+            <div style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:14, textAlign:"center"}}>
+              <div style={{fontSize:10, color:T.textMute}}>Reste à payer</div>
+              <div style={{fontSize:20, fontWeight:800, color:resteForm>0?T.red:T.green}}>{fmtPrice(resteForm)}</div>
+            </div>
+            <div style={{display:"flex", gap:8}}>
+              <button onClick={()=>{setShowForm(false); resetForm();}} style={{flex:1, background:T.surface2, border:"none", borderRadius:12, padding:12, color:T.text}}>Annuler</button>
+              <button onClick={handleSubmit} style={{flex:1, background:T.accent, border:"none", borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Enregistrer + Imprimer</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal encaissement */}
+      {payModal && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200, padding:16}}>
+          <div style={{background:T.surface, borderRadius:16, padding:18, width:"100%", maxWidth:340}}>
+            <div style={{fontSize:15, fontWeight:800, marginBottom:4}}>💰 Encaisser un versement</div>
+            <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>{payModal.prenom} {payModal.nom} — Reste: {fmtPrice(Math.max(0, payModal.total-(payModal.paidAmount||0)))}</div>
+            <input type="number" placeholder="Montant versé" value={payAmount} onChange={e=>setPayAmount(e.target.value)} style={commInputStyle(T)} />
+            <div style={{display:"flex", gap:8, marginTop:10}}>
+              <button onClick={()=>setPayModal(null)} style={{flex:1, background:T.surface2, border:"none", borderRadius:12, padding:12, color:T.text}}>Annuler</button>
+              <button onClick={()=>{
+                const amt = parseFloat(payAmount);
+                if(!amt || amt<=0){ flashMsg("⚠️ Montant invalide"); return; }
+                payCommande(payModal.id, amt);
+                setPayModal(null); setPayAmount("");
+              }} style={{flex:1, background:T.green, border:"none", borderRadius:12, padding:12, fontWeight:700, color:T.bg}}>Valider</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
