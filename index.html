@@ -1727,7 +1727,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
   const TABS = [["shops","🏪 Commerces"],["admins","👥 Admins"],["activites","📊 Activités"],["settings","⚙️ Paramètres"]];
 
   return (
-    <div style={{ minHeight:"100dvh", background:T.bg, color:T.text }}>
+    <div className="dev-dash-root" style={{ background:T.bg, color:T.text }}>
       {/* Header */}
       <div style={{ background:T.header, borderBottom:`1px solid ${T.border}`, padding:"10px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -1752,7 +1752,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
       </div>
 
       {/* KPI */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, padding:12 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, padding:12, flexShrink:0 }}>
         <div style={{ background:T.surface, borderRadius:14, padding:12, border:`1px solid ${T.green}33` }}>
           <div style={{ fontSize:10, color:T.textMute }}>Commerces actifs</div>
           <div style={{ fontSize:28, fontWeight:800, color:T.green }}>{activeShops}</div>
@@ -1776,7 +1776,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
       </div>
 
       {/* Onglets */}
-      <div style={{ display:"flex", gap:5, padding:"0 12px 8px", flexWrap:"wrap" }}>
+      <div style={{ display:"flex", gap:5, padding:"0 12px 8px", flexWrap:"wrap", flexShrink:0 }}>
         {TABS.map(([k,l]) => (
           <button key={k} onClick={() => setTab(k)}
             style={{ background:tab===k?T.purple:T.surface, borderRadius:12, padding:"7px 14px", fontSize:11, fontWeight:700, color:tab===k?"#fff":T.text, border:"none" }}>
@@ -1785,7 +1785,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
         ))}
       </div>
 
-      <div style={{ padding:"0 12px 32px", overflowY:"auto" }}>
+      <div className="dev-dash-scroll" style={{ padding:"0 12px 32px" }}>
 
         {/* ── COMMERCES ── */}
         {tab === "shops" && (
