@@ -100,6 +100,37 @@ div,span,input,textarea,button,label{transition:background .22s ease,border-colo
 @media (min-width: 640px) {
   .vr-layout { flex-direction: row; }
 }
+
+/* ── DevDashboard : hauteur fiable (fallback 100vh pour navigateurs sans dvh) + scroll garanti ── */
+.dev-dash-root{
+  height:100vh;
+  height:100dvh;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.dev-dash-scroll{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+}
+/* Grille compacte des commerces : plusieurs cartes visibles à la fois */
+.dev-shop-grid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
+}
+@media (min-width:640px){
+  .dev-shop-grid{ grid-template-columns:repeat(2,1fr); }
+}
+@media (min-width:1000px){
+  .dev-shop-grid{ grid-template-columns:repeat(3,1fr); }
+}
+@media (min-width:1400px){
+  .dev-shop-grid{ grid-template-columns:repeat(4,1fr); }
+}
 </style>
 </head>
 <body>
@@ -6335,6 +6366,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
 function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
   const [shops, setShops] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
   const [planModalShop, setPlanModalShop] = useState(null);
   const [planForm, setPlanForm] = useState({ plan: "mensuel", customMode: "days", customDays: "", customDate: "", from: "today" });
   
@@ -6400,10 +6432,16 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
     if(daysLeft <= 7) return T.orange;
     return T.green;
   };
-  
+
+  const filteredShops = shops.filter(shop => {
+    const q = search.trim().toLowerCase();
+    if(!q) return true;
+    return (shop.shopName||"").toLowerCase().includes(q) || (shop.ownerName||"").toLowerCase().includes(q) || (shop.whatsapp||"").includes(q);
+  });
+
   return (
-    <div style={{height:"100dvh", background:T.bg, display:"flex", flexDirection:"column"}}>
-      <div style={{background:T.header, padding:"8px 12px", borderBottom:`1px solid ${T.border}`, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+    <div className="dev-dash-root" style={{background:T.bg}}>
+      <div style={{background:T.header, padding:"8px 12px", borderBottom:`1px solid ${T.border}`, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, flexWrap:"wrap", flexShrink:0}}>
         <div><div style={{fontSize:9, color:T.textMute}}>Développeur</div><div style={{fontFamily:"'Outfit'", fontWeight:800, color:T.purple, fontSize:13}}>Gestion abonnements + BLE</div></div>
         <div style={{display:"flex", gap:6, alignItems:"center"}}>
           <div className="hdr-themes theme-toggle" style={{background:T.surface2}}>
@@ -6415,16 +6453,29 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
           <button onClick={logout} style={{background:"transparent", border:`1px solid ${T.border}`, borderRadius:8, padding:"4px 8px", fontSize:11}}>↩<span className="hdr-text-label"> Déco</span></button>
         </div>
       </div>
-      <div style={{flex:1, overflowY:"auto", padding:12}}>
-        <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:16}}>
+      <div className="dev-dash-scroll" style={{padding:12}}>
+        <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
           <div style={{fontWeight:700}}>🏪 Multi-commerce SaaS</div>
           <div style={{fontSize:11, color:T.textMute}}>{shops.length} commerces · Gestion des abonnements (mensuel/trimestriel/annuel) · Bande défilante pour alertes</div>
         </div>
-        {loading ? <div className="spin" style={{width:30,height:30,border:`2px solid ${T.border}`,borderTopColor:T.accent,borderRadius:"50%",margin:"20px auto"}}></div> : shops.map(shop => {
+        <input
+          type="text"
+          placeholder="🔎 Rechercher un commerce, un propriétaire, un numéro..."
+          value={search}
+          onChange={e=>setSearch(e.target.value)}
+          style={{width:"100%", background:T.inputBg||T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"10px 12px", color:T.text, fontSize:13, marginBottom:14}}
+        />
+        {loading ? (
+          <div className="spin" style={{width:30,height:30,border:`2px solid ${T.border}`,borderTopColor:T.accent,borderRadius:"50%",margin:"20px auto"}}></div>
+        ) : filteredShops.length === 0 ? (
+          <div style={{textAlign:"center", color:T.textMute, fontSize:12, padding:"30px 0"}}>Aucun commerce ne correspond à « {search} »</div>
+        ) : (
+        <div className="dev-shop-grid">
+        {filteredShops.map(shop => {
           const daysLeft = shop.subscriptionEnd ? getDaysLeft(shop.subscriptionEnd) : 0;
           const statusColor = getStatusColor(shop);
           return (
-            <div key={shop.id} style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12, borderLeft: `4px solid ${statusColor}`}}>
+            <div key={shop.id} style={{background:T.surface, borderRadius:16, padding:16, borderLeft: `4px solid ${statusColor}`}}>
               <div style={{display:"flex", justifyContent:"space-between", alignItems:"start", flexWrap:"wrap", gap:8}}>
                 <div>
                   <div style={{fontWeight:800, fontSize:16}}>{shop.shopName}</div>
@@ -6453,6 +6504,8 @@ function DevDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
             </div>
           );
         })}
+        </div>
+        )}
       </div>
       {planModalShop && (() => {
         const shop = planModalShop;
