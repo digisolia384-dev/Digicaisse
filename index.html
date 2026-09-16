@@ -26,6 +26,7 @@
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/JsBarcode/3.11.5/JsBarcode.all.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 
 <style>
@@ -2439,6 +2440,100 @@ class BLEPrinter {
 
 const printer = new BLEPrinter();
 
+// ══════════════════════════════════════════════════════════════════
+//  IMPRESSION USB (câble) - ESC/POS via WebUSB
+// ══════════════════════════════════════════════════════════════════
+class USBPrinter {
+  constructor() {
+    this.device = null;
+    this.interfaceNumber = null;
+    this.endpointOut = null;
+    this.connected = false;
+    this.listeners = [];
+  }
+
+  subscribe(callback) {
+    this.listeners.push(callback);
+    return () => { this.listeners = this.listeners.filter(l => l !== callback); };
+  }
+
+  notify(data) { this.listeners.forEach(l => l(data)); }
+
+  async connect() {
+    if (!navigator.usb) {
+      throw new Error("WebUSB non disponible. Utilisez Chrome/Edge sur PC ou Android.");
+    }
+    this.notify({ status: "searching", message: "Sélection de l'imprimante USB..." });
+    const device = await navigator.usb.requestDevice({ filters: [] });
+    this.device = device;
+    await this._openAndClaim();
+    device.addEventListener && navigator.usb.addEventListener?.("disconnect", (e) => {
+      if (e.device === this.device) {
+        this.connected = false;
+        this.notify({ status: "disconnected", message: "Imprimante USB déconnectée" });
+      }
+    });
+    this.notify({ status: "connected", message: `Connecté à ${device.productName || "Imprimante USB"}`, name: device.productName });
+    return device.productName;
+  }
+
+  async _openAndClaim() {
+    const device = this.device;
+    await device.open();
+    if (!device.configuration) await device.selectConfiguration(1);
+    let ifaceNum = null, epOut = null;
+    for (const cfg of device.configurations) {
+      for (const iface of cfg.interfaces) {
+        for (const alt of iface.alternates) {
+          const out = alt.endpoints.find(e => e.direction === "out");
+          if (out) { ifaceNum = iface.interfaceNumber; epOut = out.endpointNumber; break; }
+        }
+        if (epOut !== null) break;
+      }
+      if (epOut !== null) break;
+    }
+    if (epOut === null) throw new Error("Aucun point de sortie USB trouvé sur cette imprimante");
+    await device.claimInterface(ifaceNum);
+    this.interfaceNumber = ifaceNum;
+    this.endpointOut = epOut;
+    this.connected = true;
+  }
+
+  async disconnect() {
+    try { if (this.device && this.interfaceNumber !== null) await this.device.releaseInterface(this.interfaceNumber); } catch(e) {}
+    try { if (this.device) await this.device.close(); } catch(e) {}
+    this.connected = false;
+    this.device = null;
+    this.notify({ status: "disconnected", message: "Déconnecté" });
+  }
+
+  async print(data) {
+    if (!this.connected || !this.device || this.endpointOut === null) {
+      throw new Error("Imprimante USB non connectée");
+    }
+    const chunkSize = 4096;
+    for (let i = 0; i < data.length; i += chunkSize) {
+      const chunk = data.slice(i, i + chunkSize);
+      await this.device.transferOut(this.endpointOut, chunk);
+    }
+  }
+}
+
+const usbPrinter = new USBPrinter();
+
+function activeThermalPrinter(connType) { return connType === "usb" ? usbPrinter : printer; }
+function thermalConnected(connType) { return activeThermalPrinter(connType).connected; }
+
+// Ouverture automatique du tiroir-caisse (impulsion ESC/POS standard)
+async function openCashDrawer(connType) {
+  const cmd = new Uint8Array([0x1B, 0x70, 0x00, 0x19, 0xFA]);
+  try {
+    const p = activeThermalPrinter(connType);
+    if (p.connected) { await p.print(cmd); return true; }
+  } catch(e) {}
+  return false;
+}
+
 // ESC/POS Commands
 const ESC = 0x1B;
 const GS = 0x1D;
@@ -2572,6 +2667,24 @@ async function printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticket
     if (i < copies - 1) await new Promise(r => setTimeout(r, 600));
   }
   return true;
+}
+
+async function printViaUSB(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan) {
+  if (!usbPrinter.connected) throw new Error("Imprimante USB non connectée");
+  const col = ticketFormat === "57mm" ? COL_57 : COL_80;
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  const ticket = await buildESCPOSTicket(shopName, shopPhone, items, total, invoiceNum, col, shopLogo, ticketFooter, shopAddress, shopSlogan);
+  for (let i = 0; i < copies; i++) {
+    await usbPrinter.print(ticket);
+    if (i < copies - 1) await new Promise(r => setTimeout(r, 300));
+  }
+  return true;
+}
+
+// Dispatcher : imprime sur l'imprimante thermique active (BLE ou USB câble)
+async function printViaThermal(connType, shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan) {
+  if (connType === "usb") return printViaUSB(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan);
+  return printViaBLE(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan);
 }
 
 function printFallback(shopName, shopPhone, items, total, invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter, shopAddress, shopSlogan) {
@@ -2709,6 +2822,23 @@ async function printCommandeViaBLE(shopName, shopPhone, shopAddress, shopSlogan,
   return true;
 }
 
+async function printCommandeViaUSB(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter) {
+  if (!usbPrinter.connected) throw new Error("Imprimante USB non connectée");
+  const col = ticketFormat === "57mm" ? COL_57 : COL_80;
+  const copies = Math.max(1, parseInt(nbCopies) || 1);
+  const ticket = await buildCommandeESCPOS(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, col, ticketFooter);
+  for (let i = 0; i < copies; i++) {
+    await usbPrinter.print(ticket);
+    if (i < copies - 1) await new Promise(r => setTimeout(r, 300));
+  }
+  return true;
+}
+
+async function printCommandeViaThermal(connType, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter) {
+  if (connType === "usb") return printCommandeViaUSB(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter);
+  return printCommandeViaBLE(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter);
+}
+
 function printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter) {
   const copies = Math.max(1, parseInt(nbCopies) || 1);
   const w = ticketFormat === "57mm" ? "58mm" : "80mm";
@@ -2843,50 +2973,59 @@ function SubscriptionBanner({ T, shopId }) {
 // ══════════════════════════════════════════════════════════════════
 //  COMPOSANT BLE STATUS
 // ══════════════════════════════════════════════════════════════════
-function BLEStatus({ T }) {
+function BLEStatus({ T, connType = "ble", setConnType }) {
   const [status, setStatus] = useState({ status: "disconnected", message: "Hors ligne" });
   const [connecting, setConnecting] = useState(false);
   const [testPrinting, setTestPrinting] = useState(false);
-  
+  const activePrinter = connType === "usb" ? usbPrinter : printer;
+
   useEffect(() => {
-    const unsub = printer.subscribe(setStatus);
+    const unsub = activePrinter.subscribe(setStatus);
+    // Réinitialise l'affichage au changement de type de connexion
+    setStatus(activePrinter.connected ? { status: "connected", message: "Connecté", name: activePrinter.device?.name || activePrinter.device?.productName } : { status: "disconnected", message: "Hors ligne" });
     return unsub;
-  }, []);
-  
+  }, [connType]);
+
   const connect = async () => {
     setConnecting(true);
     try {
-      await printer.connect();
+      await activePrinter.connect();
     } catch(e) {
       setStatus({ status: "error", message: e.message });
     }
     setConnecting(false);
   };
-  
-  const disconnect = () => printer.disconnect();
-  
+
+  const disconnect = () => activePrinter.disconnect();
+
   const testPrint = async () => {
-    if (!printer.connected) { alert("Connectez d'abord l'imprimante"); return; }
+    if (!activePrinter.connected) { alert("Connectez d'abord l'imprimante"); return; }
     setTestPrinting(true);
     try {
-      const testItems = [{ label: "TEST IMPRESSION THERMIQUE", amount: 500, qty: 1 }, { label: "ESC/POS BLE - Impression OK", amount: 250, qty: 2 }];
-      await printViaBLE("TEST CAISSE PRO", "", testItems, 1000, Date.now(), "80mm", null, 1, "Test impression OK");
+      const testItems = [{ label: "TEST IMPRESSION THERMIQUE", amount: 500, qty: 1 }, { label: `ESC/POS ${connType==="usb"?"USB":"BLE"} - Impression OK`, amount: 250, qty: 2 }];
+      await printViaThermal(connType, "TEST CAISSE PRO", "", testItems, 1000, Date.now(), "80mm", null, 1, "Test impression OK");
       alert("✅ Impression test envoyée avec succès !");
     } catch(e) { alert("❌ Erreur: " + e.message); }
     setTestPrinting(false);
   };
-  
+
   const isConnected = status.status === "connected";
   const color = isConnected ? T.green : (status.status === "searching" || status.status === "reconnecting" ? T.blue : T.red);
   const icon = isConnected ? "🖨️" : (status.status === "searching" || status.status === "reconnecting" ? "⏳" : "❌");
-  
+
   return (
     <div style={{ background: T.surface, borderRadius: 12, padding: 10, marginBottom: 12, border: `1px solid ${color}` }}>
+      {setConnType && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          <button onClick={()=>setConnType("ble")} style={{ flex: 1, background: connType==="ble"?T.accent:T.surface2, border: "none", borderRadius: 8, padding: 6, fontSize: 11, fontWeight: 600, color: connType==="ble"?T.bg:T.textMute }}>📶 Bluetooth</button>
+          <button onClick={()=>setConnType("usb")} style={{ flex: 1, background: connType==="usb"?T.accent:T.surface2, border: "none", borderRadius: 8, padding: 6, fontSize: 11, fontWeight: 600, color: connType==="usb"?T.bg:T.textMute }}>🔌 USB (câble)</button>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 24 }}>{icon}</span>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color }}>{isConnected ? "Imprimante connectée" : (status.status === "searching" ? "Recherche..." : status.status === "reconnecting" ? "Reconnexion..." : "Hors ligne")}</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color }}>{isConnected ? `Imprimante ${connType==="usb"?"USB":"BLE"} connectée` : (status.status === "searching" ? "Recherche..." : status.status === "reconnecting" ? "Reconnexion..." : "Hors ligne")}</div>
             {status.name && <div style={{ fontSize: 10, color: T.textMute }}>{status.name}</div>}
             {status.message && !isConnected && <div style={{ fontSize: 9, color: T.textMute }}>{status.message}</div>}
           </div>
@@ -2902,7 +3041,7 @@ function BLEStatus({ T }) {
           )}
         </div>
       </div>
-      {isConnected && <div style={{ fontSize: 9, color: T.textMute, marginTop: 6, textAlign: "center" }}>✅ ESC/POS — Formats 80mm & 57mm disponibles</div>}
+      {isConnected && <div style={{ fontSize: 9, color: T.textMute, marginTop: 6, textAlign: "center" }}>✅ ESC/POS — Formats 80mm & 57mm disponibles{connType==="usb"?" · Imprimante branchée par câble USB":""}</div>}
     </div>
   );
 }
@@ -3365,6 +3504,8 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   const [pinError, setPinError] = useState(false);
   const [pinShake, setPinShake] = useState(false);
   const [useBLE, setUseBLE] = useState(true);
+  const [printerConnType, setPrinterConnType] = useState(() => localStorage.getItem("pos_printer_conn") || "ble");
+  const [autoCashDrawer, setAutoCashDrawer] = useState(() => localStorage.getItem("pos_auto_drawer") !== "0");
   const [ticketFormat, setTicketFormat] = useState(() => localStorage.getItem("pos_ticket_fmt") || "80mm");
   const [nbCopies, setNbCopies] = useState(() => parseInt(localStorage.getItem("pos_ticket_copies") || "1"));
   const [ticketFooter, setTicketFooter] = useState(() => localStorage.getItem("pos_ticket_footer") || "Merci pour votre confiance !\n--- Digitale Solution ---");
@@ -3412,10 +3553,10 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     // 2. Impression immédiate — ne bloque pas, ticket sort instantanément
     if(print) {
       try {
-        if (useBLE && printer.connected) {
-          printViaBLE(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter)
+        if (useBLE && thermalConnected(printerConnType)) {
+          printViaThermal(printerConnType, session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter)
             .catch(() => printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter));
-          flashMsg(`✅ Vente + impression BLE ${ticketFormat}${nbCopies>1?" x"+nbCopies+" copies":""}`);
+          flashMsg(`✅ Vente + impression ${printerConnType==="usb"?"USB":"BLE"} ${ticketFormat}${nbCopies>1?" x"+nbCopies+" copies":""}`);
         } else {
           printFallback(session.shopName, session.shopPhone, saleItems, saleTotal, newSale.invoiceNum, ticketFormat, shopLogo, nbCopies, ticketFooter);
           flashMsg(`✅ Vente + impression navigateur${nbCopies>1?" x"+nbCopies+" copies":""}`);
@@ -3427,6 +3568,9 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
     } else {
       flashMsg("✅ Vente enregistrée");
     }
+
+    // 2bis. Ouverture automatique du tiroir-caisse (si activée et imprimante connectée)
+    if (autoCashDrawer) openCashDrawer(printerConnType);
 
     // 3. Persistance en arrière-plan (fire-and-forget — n'impacte plus l'UX)
     setTimeout(() => {
@@ -3720,20 +3864,24 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
             <CaissierDashboard T={T} caissier={currentCaissier} sales={sales} onClose={()=>setCaissDash(false)} />
           )}
           <div className="desktop-main" style={{flex:1, overflowY:"auto", padding:12}}>
-            <BLEStatus T={T} />
-            <div style={{display:"flex", gap:6, marginBottom:8, flexWrap:"wrap"}}>
-              <button onClick={()=>{ setUseBLE(true); const f="80mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="80mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="80mm"?T.bg:T.text}}>🖨️ BLE 80mm</button>
-              <button onClick={()=>{ setUseBLE(true); const f="57mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="57mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="57mm"?T.bg:T.text}}>🖨️ BLE 57mm</button>
+            <BLEStatus T={T} connType={printerConnType} setConnType={(v)=>{setPrinterConnType(v); localStorage.setItem("pos_printer_conn", v);}} />
+            <div style={{display:"flex", gap:6, marginBottom:6, flexWrap:"wrap"}}>
+              <button onClick={()=>{ setUseBLE(true); const f="80mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="80mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="80mm"?T.bg:T.text}}>🖨️ Thermique 80mm</button>
+              <button onClick={()=>{ setUseBLE(true); const f="57mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="57mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="57mm"?T.bg:T.text}}>🖨️ Thermique 57mm</button>
               <button onClick={()=>setUseBLE(false)} style={{flex:"1 0 auto", background:!useBLE?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:!useBLE?T.bg:T.text}}>🖥️ Navigateur</button>
             </div>
-            <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} currentCaissier={currentCaissier} loginCaissier={loginCaissier} caissiers={caissiers} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
+            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", background:T.surface, borderRadius:10, padding:"7px 10px", marginBottom:8}}>
+              <label style={{fontSize:11, color:T.textMute, display:"flex", alignItems:"center", gap:6}}>💵 Ouverture auto du tiroir-caisse à chaque vente</label>
+              <input type="checkbox" checked={autoCashDrawer} onChange={e=>{setAutoCashDrawer(e.target.checked); localStorage.setItem("pos_auto_drawer", e.target.checked?"1":"0");}} />
+            </div>
+            <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} currentCaissier={currentCaissier} loginCaissier={loginCaissier} caissiers={caissiers} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
             {/* Spacer so FAB doesn't cover last product card */}
             <div style={{height:80}} />
           </div>
 
           {/* ── Desktop sidebar (hidden on mobile/tablet via CSS) ── */}
           <div className="desktop-sidebar" style={{background:T.surface, borderLeft:`1px solid ${T.border}`}}>
-            <PanierContent T={T} items={items} setItems={setItems} total={total} addSale={addSale} addCredit={addCredit} flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} />
+            <PanierContent T={T} items={items} setItems={setItems} total={total} addSale={addSale} addCredit={addCredit} flashMsg={flashMsg} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} />
           </div>
 
           {/* ── FAB panier mobile/tablette ── */}
@@ -3786,7 +3934,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
                     T={T} items={items} setItems={setItems} total={total}
                     addSale={(itms, tot, print) => { addSale(itms, tot, print); setMobileCartOpen(false); }}
                     addCredit={(itms,tot,name) => { addCredit(itms,tot,name); setMobileCartOpen(false); }}
-                    flashMsg={flashMsg} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies}
+                    flashMsg={flashMsg} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies}
                   />
                 </div>
               </div>
@@ -3796,10 +3944,10 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
       )}
       
       {ownerMode && (
-        <OwnerContent T={T} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} setShopName={setShopName} setShopPhone={setShopPhone} setShopAddress={setShopAddress} setShopSlogan={setShopSlogan} saveShopInfo={saveShopInfo} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} updateGerantPin={updateGerantPin} session={session} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} ticketFooter={ticketFooter} setTicketFooter={setTicketFooter} />
+        <OwnerContent T={T} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} setShopName={setShopName} setShopPhone={setShopPhone} setShopAddress={setShopAddress} setShopSlogan={setShopSlogan} saveShopInfo={saveShopInfo} whatsapp={session.whatsapp} products={products} setProducts={setProducts} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} updateAdminPin={updateAdminPin} updateGerantPin={updateGerantPin} session={session} credits={credits} payCredit={payCredit} caissiers={caissiers} saveCaissier={saveCaissier} deleteCaissier={deleteCaissier} loginCaissier={loginCaissier} currentCaissier={currentCaissier} shopLogo={shopLogo} setShopLogo={setShopLogo} addSale={addSale} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} setTicketFormat={setTicketFormat} nbCopies={nbCopies} setNbCopies={setNbCopies} ticketFooter={ticketFooter} setTicketFooter={setTicketFooter} />
       )}
       {gerantMode && !ownerMode && (
-        <GerantContent T={T} products={products} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} shopName={shopName} commandes={commandes} addCommande={addCommande} payCommande={payCommande} deleteCommande={deleteCommande} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
+        <GerantContent T={T} products={products} sales={sales} flashMsg={flashMsg} shopId={session.shopId} stockMovements={stockMovements} updateStock={updateStock} shopName={shopName} commandes={commandes} addCommande={addCommande} payCommande={payCommande} deleteCommande={deleteCommande} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
       )}
     </div>
   );
@@ -3846,7 +3994,7 @@ function CaissePinLock({ T, caissiers, loginCaissier }) {
   );
 }
 
-function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg, sales, cancelSale, shopId, currentCaissier, loginCaissier, caissiers, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
+function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg, sales, cancelSale, shopId, currentCaissier, loginCaissier, caissiers, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, printerConnType, ticketFormat, nbCopies, ticketFooter }) {
   const [view, setView] = useState("catalog");
   // Source de verite des flags : caissiers[] (live Firestore) > currentCaissier (sessionStorage stale)
   const activeCaissier = currentCaissier
@@ -3933,11 +4081,43 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
 
   React.useEffect(() => () => stopScanner(), []);
 
+  // ── Scanner USB (douchette / lecteur code-barres filaire) ──────────
+  // Une douchette USB émule un clavier : elle tape les caractères du code
+  // très rapidement (< 30ms entre chaque touche) puis envoie "Entrée".
+  // On distingue cette frappe d'une saisie humaine grâce à la vitesse.
+  const usbScanBuffer = React.useRef("");
+  const usbScanLastTime = React.useRef(0);
+  React.useEffect(() => {
+    const handleUsbScan = (e) => {
+      // Ignore si on tape dans un champ texte/zone de saisie normale (saisie lente de toute façon)
+      const now = Date.now();
+      const elapsed = now - usbScanLastTime.current;
+      usbScanLastTime.current = now;
+      if (e.key === "Enter") {
+        const code = usbScanBuffer.current.trim();
+        usbScanBuffer.current = "";
+        if (code.length >= 3) {
+          const found = products.find(p => p.barcode === code);
+          if (found) { addProduct(found); flashMsg(`🔌 ${found.name} ajouté (scan USB)`); }
+          else { flashMsg(`🔌 Code ${code} — produit non trouvé`); }
+        }
+        return;
+      }
+      if (e.key.length === 1) {
+        // Frappe rapide (douchette) : on accumule. Frappe lente (humain) : on repart de zéro.
+        if (elapsed > 60) usbScanBuffer.current = "";
+        usbScanBuffer.current += e.key;
+      }
+    };
+    window.addEventListener("keydown", handleUsbScan);
+    return () => window.removeEventListener("keydown", handleUsbScan);
+  }, [products]);
+
   const reprintSale = (s) => {
     const saleItems = (s.items||[]).map(i=>({label:i.label,amount:i.amount,qty:i.qty||1}));
     try {
-      if (useBLE && printer && printer.connected) {
-        printViaBLE(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan)
+      if (useBLE && thermalConnected(printerConnType)) {
+        printViaThermal(printerConnType, shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan)
           .catch(()=>printFallback(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan));
       } else {
         printFallback(shopName, shopPhone, saleItems, s.total, s.invoiceNum, ticketFormat, shopLogo, nbCopies||1, ticketFooter||"", shopAddress, shopSlogan);
@@ -4226,13 +4406,13 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
   );
 }
 
-function PanierContent({ T, items, setItems, total, addSale, addCredit, flashMsg, useBLE, ticketFormat, nbCopies }) {
+function PanierContent({ T, items, setItems, total, addSale, addCredit, flashMsg, useBLE, printerConnType, ticketFormat, nbCopies }) {
   const updateQty = (id, delta) => setItems(items.map(i=>i.id===id?{...i, qty:Math.max(1,(i.qty||1)+delta)}:i));
   const removeItem = (id) => setItems(items.filter(i=>i.id!==id));
   const clearCart = () => { if(confirm("Annuler toute la vente ?")) setItems([]); };
   const cartTotal = items.reduce((s,i)=>s+(i.qty||1),0);
   const copiesLabel = nbCopies > 1 ? ` x${nbCopies}` : "";
-  const printLabel = useBLE ? `🖨️ BLE ${ticketFormat||"80mm"}${copiesLabel} + Valider` : `🖥️ Imprimer${copiesLabel} + Valider`;
+  const printLabel = useBLE ? `🖨️ ${printerConnType==="usb"?"USB":"BLE"} ${ticketFormat||"80mm"}${copiesLabel} + Valider` : `🖥️ Imprimer${copiesLabel} + Valider`;
   const [creditModal, setCreditModal] = useState(false);
   const [clientName, setClientName] = useState("");
   // ── FONCTIONNALITÉ 4 : Remise ──────────────────────────────────
@@ -5237,7 +5417,7 @@ function SectionVentes({ T, sales, hasBeneficeData }) {
 // ══════════════════════════════════════════════════════════════════
 //  GÉRANT CONTENT — Stats + Stock (sans PIN)
 // ══════════════════════════════════════════════════════════════════
-function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName, commandes, addCommande, payCommande, deleteCommande, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
+function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName, commandes, addCommande, payCommande, deleteCommande, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, printerConnType, ticketFormat, nbCopies, ticketFooter }) {
   const [tab, setTab] = useState("stats");
 
   // ── Stats du jour ──────────────────────────────────────────────
@@ -5414,7 +5594,7 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
 
       {/* ── COMMANDES ── */}
       {tab==="commandes" && (
-        <CommandesGerant T={T} commandes={commandes} addCommande={addCommande} payCommande={payCommande} deleteCommande={deleteCommande} flashMsg={flashMsg} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
+        <CommandesGerant T={T} commandes={commandes} addCommande={addCommande} payCommande={payCommande} deleteCommande={deleteCommande} flashMsg={flashMsg} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
       )}
     </div>
   );
@@ -5427,7 +5607,7 @@ function commInputStyle(T) {
   return { width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:11, marginBottom:8, color:T.text, fontSize:13, boxSizing:"border-box" };
 }
 
-function CommandesGerant({ T, commandes, addCommande, payCommande, deleteCommande, flashMsg, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, ticketFormat, nbCopies, ticketFooter }) {
+function CommandesGerant({ T, commandes, addCommande, payCommande, deleteCommande, flashMsg, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, printerConnType, ticketFormat, nbCopies, ticketFooter }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ nom:"", prenom:"", telephone:"", nbArticles:"", total:"", versement:"" });
   const [filter, setFilter] = useState("all");
@@ -5445,8 +5625,8 @@ function CommandesGerant({ T, commandes, addCommande, payCommande, deleteCommand
 
   const handlePrint = (commande) => {
     try {
-      if (useBLE && typeof printer !== "undefined" && printer.connected) {
-        printCommandeViaBLE(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter)
+      if (useBLE && thermalConnected(printerConnType)) {
+        printCommandeViaThermal(printerConnType, shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter)
           .catch(()=>printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter));
       } else {
         printCommandeFallback(shopName, shopPhone, shopAddress, shopSlogan, shopLogo, commande, ticketFormat, nbCopies, ticketFooter);
@@ -5606,7 +5786,7 @@ function CommandesGerant({ T, commandes, addCommande, payCommande, deleteCommand
 }
 
 // ══════════════════════════════════════════════════════════════════
-function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShopName, setShopPhone, setShopAddress, setShopSlogan, saveShopInfo, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, updateGerantPin, session, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale, ticketFormat, setTicketFormat, nbCopies, setNbCopies, ticketFooter, setTicketFooter }) {
+function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShopName, setShopPhone, setShopAddress, setShopSlogan, saveShopInfo, whatsapp, products, setProducts, sales, flashMsg, shopId, stockMovements, updateStock, updateAdminPin, updateGerantPin, session, credits, payCredit, caissiers, saveCaissier, deleteCaissier, loginCaissier, currentCaissier, shopLogo, setShopLogo, addSale, useBLE, printerConnType, ticketFormat, setTicketFormat, nbCopies, setNbCopies, ticketFooter, setTicketFooter }) {
   const [tab, setTab] = useState("stats");
   const [showForm, setShowForm] = useState(false);
   const [editProd, setEditProd] = useState(null);
@@ -5627,8 +5807,12 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
   const [comptablePin, setComptablePin] = useState(() => localStorage.getItem(`pos_comptable_pin_${shopId}`) || "1234");
   const [showComptablePinForm, setShowComptablePinForm] = useState(false);
   const [newComptablePin, setNewComptablePin] = useState(""); const [newComptablePinConfirm, setNewComptablePinConfirm] = useState("");
+  const [bcSelected, setBcSelected] = useState({}); // { productId: qty }
+  const [bcSearch, setBcSearch] = useState("");
+  const [bcPrinting, setBcPrinting] = useState(false);
+  const [bcOnlyMissing, setBcOnlyMissing] = useState(false);
 
-  const db_ref = window.db;
+  const db_ref = db;
 
   const handleLogoUpload = async (e) => {
     const file = e.target.files[0];
@@ -5665,26 +5849,153 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
     return unsub;
   }, [shopId]);
 
+  const genBarcode = () => {
+    // EAN-13-like : préfixe 20 (usage interne) + timestamp + aléa, unique parmi les produits existants
+    let code;
+    do {
+      code = "20" + Date.now().toString().slice(-9) + Math.floor(10 + Math.random()*90);
+      code = code.slice(0, 12);
+    } while (products.some(p => p.barcode === code));
+    return code;
+  };
+
   const addOrUpdate = () => {
     if(!pName.trim()) { flashMsg("Nom requis"); return; }
     const price = parseInt(pPrice); if(!price) { flashMsg("Prix invalide"); return; }
     const prixAchat = parseInt(pPrixAchat)||0; const stock = pStockUnlimited ? -1 : (parseInt(pStock)||0);
+    const barcode = pBarcode.trim() || genBarcode();
     if(editProd) {
-      const updated = products.map(p=>p.id===editProd.id?{...p, name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode:pBarcode.trim()||null, photo:pPhoto||null}:p);
+      const updated = products.map(p=>p.id===editProd.id?{...p, name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode, photo:pPhoto||null}:p);
       setProducts(updated); OfflineStore.set(shopId, "products", updated);
-      if(db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(editProd.id).update({name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode:pBarcode.trim()||null, photo:pPhoto||null});
+      if(db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(editProd.id).update({name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode, photo:pPhoto||null});
       flashMsg("Produit modifié");
     } else {
-      const newProd = { id: Date.now().toString(36)+Math.random().toString(36).slice(2), name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode:pBarcode.trim()||null, photo:pPhoto||null, active:true };
+      const newProd = { id: Date.now().toString(36)+Math.random().toString(36).slice(2), name:pName.trim(), price, prixAchat, stock, category:pCategory.trim()||null, barcode, photo:pPhoto||null, active:true };
       setProducts([...products, newProd]); OfflineStore.set(shopId, "products", [...products, newProd]);
       if(db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(newProd.id).set(newProd);
-      flashMsg("Produit ajouté");
+      flashMsg(`Produit ajouté · code-barres ${barcode}`);
     }
     setShowForm(false);
+  };
+  const assignMissingBarcodes = () => {
+    const missing = products.filter(p => !p.barcode);
+    if (!missing.length) { flashMsg("Tous les produits ont déjà un code-barres"); return; }
+    const used = new Set(products.map(p=>p.barcode).filter(Boolean));
+    const updated = products.map(p => {
+      if (p.barcode) return p;
+      let code;
+      do { code = "20" + Date.now().toString().slice(-9) + Math.floor(10 + Math.random()*90); code = code.slice(0,12) + Math.floor(Math.random()*9); } while (used.has(code));
+      used.add(code);
+      if(db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(p.id).update({barcode: code});
+      return {...p, barcode: code};
+    });
+    setProducts(updated); OfflineStore.set(shopId, "products", updated);
+    flashMsg(`🔖 ${missing.length} code(s)-barres généré(s)`);
   };
   const openEdit = (p) => { setEditProd(p); setPName(p.name); setPPrice(String(p.price)); setPPrixAchat(p.prixAchat?String(p.prixAchat):""); setPStock(p.stock===undefined||p.stock===null||p.stock===-1?"":String(p.stock)); setPStockUnlimited(p.stock===undefined||p.stock===null||p.stock===-1); setPCategory(p.category||""); setPBarcode(p.barcode||""); setPPhoto(p.photo||null); setShowForm(true); };
   const openNew = () => { setEditProd(null); setPName(""); setPPrice(""); setPPrixAchat(""); setPStock(""); setPStockUnlimited(false); setPCategory(""); setPBarcode(""); setPPhoto(null); setShowForm(true); };
   const deleteProd = (p) => { if(confirm(`Supprimer ${p.name} ?`)) { setProducts(products.filter(pr=>pr.id!==p.id)); OfflineStore.set(shopId, "products", products.filter(pr=>pr.id!==p.id)); if(db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(p.id).delete(); flashMsg("Produit supprimé"); } };
+
+  const printBarcodeLabel = async (p) => {
+    if (!p.barcode) { flashMsg("⚠️ Ce produit n'a pas de code-barres"); return; }
+    if (typeof JsBarcode === "undefined") { flashMsg("⚠️ Librairie code-barres non chargée"); return; }
+    try {
+      const canvas = document.createElement("canvas");
+      JsBarcode(canvas, p.barcode, { format: "CODE128", width: 2, height: 60, displayValue: true, fontSize: 16, margin: 4, text: `${p.name.slice(0,24)}  ${fmtPrice(p.price)}` });
+      const dataUrl = canvas.toDataURL("image/png");
+      if (useBLE && thermalConnected(printerConnType)) {
+        const bytes = await logoToESCPOS(dataUrl, 384);
+        const activePrinter = printerConnType === "usb" ? usbPrinter : printer;
+        await activePrinter.print(new Uint8Array([...bytes, 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x03]));
+        flashMsg(`🖨️ Étiquette de ${p.name} imprimée`);
+      } else {
+        const win = window.open("", "_blank", "width=400,height=300");
+        if (win) {
+          win.document.write(`<html><head><title>Étiquette</title></head><body style="text-align:center;margin:10px"><img src="${dataUrl}" style="max-width:100%" onload="window.print()" /></body></html>`);
+          win.document.close();
+        }
+      }
+    } catch(e) { flashMsg("❌ Erreur impression étiquette : " + e.message); }
+  };
+
+  // ══════════════════════════════════════════════════════════
+  //  MODULE GROUPÉ — génération + impression de codes-barres en lot
+  // ══════════════════════════════════════════════════════════
+  const bcFiltered = products.filter(p => {
+    if (bcOnlyMissing && p.barcode) return false;
+    if (bcSearch.trim() && !p.name.toLowerCase().includes(bcSearch.trim().toLowerCase())) return false;
+    return true;
+  });
+  const bcSelectedIds = Object.keys(bcSelected).filter(id => bcSelected[id] > 0);
+  const bcToggle = (p) => setBcSelected(s => { const n={...s}; if(n[p.id]) delete n[p.id]; else n[p.id]=1; return n; });
+  const bcSetQty = (id, qty) => setBcSelected(s => ({...s, [id]: Math.max(1, parseInt(qty)||1)}));
+  const bcSelectAllVisible = () => setBcSelected(s => { const n={...s}; bcFiltered.forEach(p=>{ if(!n[p.id]) n[p.id]=1; }); return n; });
+  const bcClearSelection = () => setBcSelected({});
+
+  const bcGenerateSelected = () => {
+    if (!bcSelectedIds.length) { flashMsg("Sélectionnez au moins un produit"); return; }
+    const used = new Set(products.map(p=>p.barcode).filter(Boolean));
+    let count = 0;
+    const updated = products.map(p => {
+      if (!bcSelectedIds.includes(p.id) || p.barcode) return p;
+      let code;
+      do { code = "20" + Date.now().toString().slice(-9) + Math.floor(100 + Math.random()*900); } while (used.has(code));
+      used.add(code); count++;
+      if (db_ref) db_ref.collection("shops").doc(shopId).collection("products").doc(p.id).update({barcode: code});
+      return {...p, barcode: code};
+    });
+    setProducts(updated); OfflineStore.set(shopId, "products", updated);
+    flashMsg(count ? `🔖 ${count} code(s)-barres généré(s)` : "Les produits sélectionnés ont déjà un code-barres");
+  };
+
+  const bcBuildLabelDataUrl = (p) => {
+    const canvas = document.createElement("canvas");
+    JsBarcode(canvas, p.barcode, { format: "CODE128", width: 2, height: 60, displayValue: true, fontSize: 16, margin: 4, text: `${p.name.slice(0,24)}  ${fmtPrice(p.price)}` });
+    return canvas.toDataURL("image/png");
+  };
+
+  const bcPrintSelected = async () => {
+    const list = bcSelectedIds.map(id => ({ product: products.find(p=>p.id===id), qty: bcSelected[id] })).filter(x => x.product && x.product.barcode);
+    if (!list.length) { flashMsg("⚠️ Aucun produit sélectionné avec code-barres (générez-les d'abord)"); return; }
+    if (typeof JsBarcode === "undefined") { flashMsg("⚠️ Librairie code-barres non chargée"); return; }
+    setBcPrinting(true);
+    try {
+      if (useBLE && thermalConnected(printerConnType)) {
+        const activePrinter = printerConnType === "usb" ? usbPrinter : printer;
+        let total = 0;
+        for (const { product, qty } of list) {
+          const dataUrl = bcBuildLabelDataUrl(product);
+          const bytes = await logoToESCPOS(dataUrl, 384);
+          for (let i = 0; i < qty; i++) {
+            await activePrinter.print(new Uint8Array([...bytes, 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x03]));
+            total++;
+            await new Promise(r => setTimeout(r, printerConnType==="usb" ? 200 : 500));
+          }
+        }
+        flashMsg(`🖨️ ${total} étiquette(s) imprimée(s)`);
+      } else {
+        const imgs = [];
+        list.forEach(({ product, qty }) => { const url = bcBuildLabelDataUrl(product); for (let i=0;i<qty;i++) imgs.push(url); });
+        const win = window.open("", "_blank");
+        if (win) {
+          win.document.write(`<html><head><title>Étiquettes code-barres</title><style>
+            body{margin:10px;font-family:sans-serif}
+            .grid{display:flex;flex-wrap:wrap;gap:8px}
+            .lbl{border:1px dashed #999;padding:6px;text-align:center}
+            .lbl img{max-width:220px}
+          </style></head><body>
+            <div class="grid">${imgs.map(u=>`<div class="lbl"><img src="${u}" /></div>`).join("")}</div>
+            <script>window.onload=()=>setTimeout(()=>window.print(),300)<\/script>
+          </body></html>`);
+          win.document.close();
+        }
+        flashMsg(`🖥️ ${imgs.length} étiquette(s) envoyée(s) à l'impression navigateur`);
+      }
+    } catch(e) { flashMsg("❌ Erreur impression groupée : " + e.message); }
+    setBcPrinting(false);
+  };
+
+
   const handlePinChange = () => { if(newPin.length!==4){flashMsg("4 chiffres requis");return;} if(newPin!==newPinConfirm){flashMsg("PIN différents");return;} updateAdminPin(newPin); setShowPinForm(false); setNewPin(""); setNewPinConfirm(""); };
 
   // ── Stats analytics ────────────────────────────────────────────────
@@ -5826,7 +6137,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
   return (
     <div style={{flex:1, overflowY:"auto", padding:12}}>
       <div style={{display:"flex", gap:5, marginBottom:14, flexWrap:"wrap", overflowX:"auto", paddingBottom:4}}>
-        {[["stats","📊 Stats"],["analytics","📈 Analyse"],["kpi","💡 KPI"],["prevision","🤖 Prévision"],["classement","🏆 Classement"],["repas","🍽️ Repas"],["products","📦 Produits"],["stock","📋 Stock"],["valorisation","💰 Valeur stock"],["depenses","💸 Dépenses"],["reappro","🔄 Réappro"],["commandes","🚚 Commandes"],["dettes","💳 Dettes"],["clients","🧑‍🤝‍🧑 Clients"],["promos","🎟️ Promos"],["abonnements","🔄 Abonnements"],["fournisseurs","📦 Fournisseurs"],["devis","🧾 Devis"],["retours","🔁 Retours"],["lots","🛍️ Lots"],["cloture","📅 Clôture"],["sessions","⏰ Sessions"],["audit","📋 Audit"],["import","🗂️ Import"],["qrcode","🌐 QR Code"],["alertes","🔔 Alertes"],["scanfacture","📷 Scan Facture"],["caissiers","👥 Caissiers"],["sales","🧾 Ventes"],["settings","⚙️ Param."]].filter((v,i,a)=>a.findIndex(x=>x[0]===v[0])===i).map(([k,l])=>(
+        {[["stats","📊 Stats"],["analytics","📈 Analyse"],["kpi","💡 KPI"],["prevision","🤖 Prévision"],["classement","🏆 Classement"],["repas","🍽️ Repas"],["products","📦 Produits"],["barcodes","🔖 Codes-barres"],["stock","📋 Stock"],["valorisation","💰 Valeur stock"],["depenses","💸 Dépenses"],["reappro","🔄 Réappro"],["commandes","🚚 Commandes"],["dettes","💳 Dettes"],["clients","🧑‍🤝‍🧑 Clients"],["promos","🎟️ Promos"],["abonnements","🔄 Abonnements"],["fournisseurs","📦 Fournisseurs"],["devis","🧾 Devis"],["retours","🔁 Retours"],["lots","🛍️ Lots"],["cloture","📅 Clôture"],["sessions","⏰ Sessions"],["audit","📋 Audit"],["import","🗂️ Import"],["qrcode","🌐 QR Code"],["alertes","🔔 Alertes"],["scanfacture","📷 Scan Facture"],["caissiers","👥 Caissiers"],["sales","🧾 Ventes"],["settings","⚙️ Param."]].filter((v,i,a)=>a.findIndex(x=>x[0]===v[0])===i).map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?T.accent:T.surface, borderRadius:12, padding:"7px 12px", flexShrink:0, fontSize:11, fontWeight:600, color:tab===k?T.bg:T.text}}>{l}</button>
         ))}
       </div>
@@ -5996,7 +6307,10 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
       {/* ── PRODUITS ── */}
       {tab==="products" && (
         <>
-          <button onClick={openNew} style={{background:T.green, border:"none", borderRadius:12, padding:12, marginBottom:12, width:"100%", fontWeight:700, color:T.bg}}>+ Nouveau produit</button>
+          <button onClick={openNew} style={{background:T.green, border:"none", borderRadius:12, padding:12, marginBottom:8, width:"100%", fontWeight:700, color:T.bg}}>+ Nouveau produit</button>
+          {products.some(p=>!p.barcode) && (
+            <button onClick={assignMissingBarcodes} style={{background:T.btnBlue.bg, border:`1px solid ${T.blue}44`, borderRadius:12, padding:10, marginBottom:12, width:"100%", fontWeight:700, color:T.blue, fontSize:12}}>🔖 Générer les codes-barres manquants ({products.filter(p=>!p.barcode).length})</button>
+          )}
           {allCats.length>0 && <div style={{fontSize:10, color:T.textMute, marginBottom:8}}>Catégories: {allCats.join(" · ")}</div>}
           {products.map(p=>{
             const marge=p.prixAchat?p.price-p.prixAchat:null;
@@ -6012,14 +6326,57 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
                   <div style={{fontSize:10}}>{p.stock===undefined||p.stock===null||p.stock===-1?"♾️ Illimité":`Stock: ${p.stock}`}</div>
                   {p.barcode&&<div style={{fontSize:9, color:T.textMute}}>🔖 {p.barcode}</div>}
                 </div>
-                <div style={{flexShrink:0, display:"flex", gap:4}}>
+                <div style={{flexShrink:0, display:"flex", gap:4, flexWrap:"wrap", justifyContent:"flex-end", maxWidth:80}}>
                   <button onClick={()=>openEdit(p)} style={{background:T.btnBlue.bg, border:"none", borderRadius:8, padding:"4px 10px"}}>✏️</button>
+                  <button onClick={()=>printBarcodeLabel(p)} title="Imprimer l'étiquette code-barres" style={{background:T.surface2, border:"none", borderRadius:8, padding:"4px 10px"}}>🔖🖨️</button>
                   <button onClick={()=>deleteProd(p)} style={{background:T.btnRed.bg, border:"none", borderRadius:8, padding:"4px 10px"}}>🗑️</button>
                 </div>
               </div>
             );
           })}
         </>
+      )}
+
+      {/* ── CODES-BARRES (module groupé génération + impression) ── */}
+      {tab==="barcodes" && (
+        <div>
+          <div style={{background:T.surface, borderRadius:12, padding:12, marginBottom:12}}>
+            <div style={{fontSize:12, fontWeight:700, marginBottom:8}}>🔖 Génération &amp; impression groupée de codes-barres</div>
+            <input placeholder="🔍 Rechercher un produit..." value={bcSearch} onChange={e=>setBcSearch(e.target.value)} style={{width:"100%", background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:10, padding:10, marginBottom:8, color:T.text, fontSize:13, boxSizing:"border-box"}} />
+            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10}}>
+              <label style={{fontSize:11, color:T.textMute, display:"flex", alignItems:"center", gap:6}}>
+                <input type="checkbox" checked={bcOnlyMissing} onChange={e=>setBcOnlyMissing(e.target.checked)} /> Sans code-barres uniquement
+              </label>
+              <div style={{display:"flex", gap:6}}>
+                <button onClick={bcSelectAllVisible} style={{background:T.surface2, border:"none", borderRadius:8, padding:"5px 10px", fontSize:10, color:T.text}}>Tout sélectionner</button>
+                <button onClick={bcClearSelection} style={{background:T.surface2, border:"none", borderRadius:8, padding:"5px 10px", fontSize:10, color:T.text}}>Aucun</button>
+              </div>
+            </div>
+
+            <div style={{maxHeight:320, overflowY:"auto", border:`1px solid ${T.border}`, borderRadius:10, marginBottom:10}}>
+              {bcFiltered.length===0 && <div style={{textAlign:"center", padding:20, color:T.textMute, fontSize:12}}>Aucun produit</div>}
+              {bcFiltered.map(p=>(
+                <div key={p.id} style={{display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderBottom:`1px solid ${T.border}`}}>
+                  <input type="checkbox" checked={!!bcSelected[p.id]} onChange={()=>bcToggle(p)} />
+                  <div style={{flex:1, minWidth:0}}>
+                    <div style={{fontSize:12, fontWeight:600}}>{p.name}</div>
+                    <div style={{fontSize:9, color:T.textMute}}>{p.barcode ? `🔖 ${p.barcode}` : "⚠️ Pas de code-barres"}</div>
+                  </div>
+                  {bcSelected[p.id] ? (
+                    <input type="number" min="1" value={bcSelected[p.id]} onChange={e=>bcSetQty(p.id, e.target.value)} style={{width:50, background:T.inputBg, border:`1px solid ${T.border}`, borderRadius:8, padding:5, color:T.text, fontSize:12, textAlign:"center"}} />
+                  ) : <div style={{width:50}} />}
+                </div>
+              ))}
+            </div>
+
+            <div style={{fontSize:11, color:T.textMute, marginBottom:10}}>{bcSelectedIds.length} produit(s) sélectionné(s) · {bcSelectedIds.reduce((s,id)=>s+(bcSelected[id]||0),0)} étiquette(s) au total</div>
+
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              <button onClick={bcGenerateSelected} style={{flex:"1 0 auto", background:T.btnBlue.bg, border:`1px solid ${T.blue}44`, borderRadius:10, padding:11, fontWeight:700, color:T.blue, fontSize:12}}>🔖 Générer les codes manquants</button>
+              <button onClick={bcPrintSelected} disabled={bcPrinting} style={{flex:"1 0 auto", background:T.green, border:"none", borderRadius:10, padding:11, fontWeight:700, color:T.bg, fontSize:12}}>{bcPrinting ? "Impression..." : `🖨️ Imprimer (${useBLE?(printerConnType==="usb"?"USB":"BLE"):"Navigateur"})`}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── STOCK ── */}
@@ -6333,7 +6690,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
               <div style={{background:T.surface2, borderRadius:8, padding:"5px 12px", marginBottom:8, fontSize:11, color:T.textMute}}>💰 Marge: <span style={{color:T.accent, fontWeight:700}}>{fmtPrice(parseInt(pPrice)-parseInt(pPrixAchat))}</span> · {Math.round(((parseInt(pPrice)-parseInt(pPrixAchat))/parseInt(pPrixAchat))*100)}%</div>
             )}
             <input placeholder="Catégorie (ex: Boissons, Alimentation...)" value={pCategory} onChange={e=>setPCategory(e.target.value)} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:8, color:T.text}} />
-            <input placeholder="Code-barres (optionnel)" value={pBarcode} onChange={e=>setPBarcode(e.target.value)} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:8, color:T.text}} />
+            <input placeholder="Code-barres (laisser vide = généré automatiquement)" value={pBarcode} onChange={e=>setPBarcode(e.target.value)} style={{width:"100%", background:T.inputBg, borderRadius:12, padding:12, marginBottom:8, color:T.text}} />
             {/* Photo produit */}
             <div style={{marginBottom:8}}>
               {pPhoto && <img src={pPhoto} style={{width:"100%", maxHeight:120, objectFit:"cover", borderRadius:10, marginBottom:6}} />}
