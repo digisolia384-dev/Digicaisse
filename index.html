@@ -3506,6 +3506,7 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   const [useBLE, setUseBLE] = useState(true);
   const [printerConnType, setPrinterConnType] = useState(() => localStorage.getItem("pos_printer_conn") || "ble");
   const [autoCashDrawer, setAutoCashDrawer] = useState(() => localStorage.getItem("pos_auto_drawer") !== "0");
+  const [printerPanelOpen, setPrinterPanelOpen] = useState(() => localStorage.getItem("pos_printer_panel_open") !== "0");
   const [ticketFormat, setTicketFormat] = useState(() => localStorage.getItem("pos_ticket_fmt") || "80mm");
   const [nbCopies, setNbCopies] = useState(() => parseInt(localStorage.getItem("pos_ticket_copies") || "1"));
   const [ticketFooter, setTicketFooter] = useState(() => localStorage.getItem("pos_ticket_footer") || "Merci pour votre confiance !\n--- Digitale Solution ---");
@@ -3843,40 +3844,52 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
         </div>
       </div>
       
-      {mode === "CAISSE" && (
+      {mode === "CAISSE" && !ownerMode && !gerantMode && (
         <div className="desktop-grid" style={{flex:1, overflow:"hidden", position:"relative"}}>
-          {/* caissier bar */}
-          {caissiers.length > 0 && (
-            <div style={{display:"flex", alignItems:"center", gap:8, padding:"4px 12px", background:T.surface2, borderBottom:`1px solid ${T.border}`, flexShrink:0}}>
-              <span style={{fontSize:11, color:T.textMute}}>👤</span>
-              {currentCaissier
-                ? <>
-                    <span style={{fontSize:11, fontWeight:600}}>{currentCaissier.name}</span>
-                    {currentCaissier.role && <span style={{fontSize:9, background:ROLES[currentCaissier.role]?.color+"33"||"transparent", color:ROLES[currentCaissier.role]?.color||"#aaa", borderRadius:6, padding:"1px 6px", fontWeight:700}}>{ROLES[currentCaissier.role]?.label||currentCaissier.role}</span>}
-                    <button onClick={()=>setCaissDash(true)} style={{fontSize:10, background:T.btnBlue.bg, border:`1px solid ${T.blue}44`, borderRadius:6, padding:"2px 8px", color:T.blue}}>📊 Mes stats</button>
-                    <button onClick={logoutCaissier} style={{fontSize:10, background:"transparent", border:"none", color:T.red}}>Quitter</button>
-                  </>
-                : <span style={{fontSize:11, color:T.orange}}>Aucun caissier — cliquez Admin → Caissiers</span>
-              }
+          <div style={{display:"flex", flexDirection:"column", flex:1, minWidth:0, overflow:"hidden"}}>
+            {/* caissier bar */}
+            {caissiers.length > 0 && (
+              <div style={{display:"flex", alignItems:"center", gap:8, padding:"4px 12px", background:T.surface2, borderBottom:`1px solid ${T.border}`, flexShrink:0}}>
+                <span style={{fontSize:11, color:T.textMute}}>👤</span>
+                {currentCaissier
+                  ? <>
+                      <span style={{fontSize:11, fontWeight:600}}>{currentCaissier.name}</span>
+                      {currentCaissier.role && <span style={{fontSize:9, background:ROLES[currentCaissier.role]?.color+"33"||"transparent", color:ROLES[currentCaissier.role]?.color||"#aaa", borderRadius:6, padding:"1px 6px", fontWeight:700}}>{ROLES[currentCaissier.role]?.label||currentCaissier.role}</span>}
+                      <button onClick={()=>setCaissDash(true)} style={{fontSize:10, background:T.btnBlue.bg, border:`1px solid ${T.blue}44`, borderRadius:6, padding:"2px 8px", color:T.blue}}>📊 Mes stats</button>
+                      <button onClick={logoutCaissier} style={{fontSize:10, background:"transparent", border:"none", color:T.red}}>Quitter</button>
+                    </>
+                  : <span style={{fontSize:11, color:T.orange}}>Aucun caissier — cliquez Admin → Caissiers</span>
+                }
+              </div>
+            )}
+            {caissDash && currentCaissier && (
+              <CaissierDashboard T={T} caissier={currentCaissier} sales={sales} onClose={()=>setCaissDash(false)} />
+            )}
+            <div className="desktop-main" style={{flex:1, overflowY:"auto", padding:12}}>
+              <div style={{background:T.surface, borderRadius:12, marginBottom:8, overflow:"hidden", border:`1px solid ${T.border}`}}>
+                <button onClick={()=>{ const v=!printerPanelOpen; setPrinterPanelOpen(v); localStorage.setItem("pos_printer_panel_open", v?"1":"0"); }} style={{width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", background:"transparent", border:"none", padding:"10px 12px", cursor:"pointer"}}>
+                  <span style={{fontSize:12, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:6}}>🖨️ Imprimante & impression <span style={{fontSize:10, fontWeight:400, color:T.textMute}}>({printerConnType==="usb"?"USB":"Bluetooth"} · {useBLE?`Thermique ${ticketFormat}`:"Navigateur"})</span></span>
+                  <span style={{fontSize:14, color:T.textMute, transform:printerPanelOpen?"rotate(180deg)":"none", transition:"transform .15s"}}>▾</span>
+                </button>
+                {printerPanelOpen && (
+                  <div style={{padding:"0 12px 12px"}}>
+                    <BLEStatus T={T} connType={printerConnType} setConnType={(v)=>{setPrinterConnType(v); localStorage.setItem("pos_printer_conn", v);}} />
+                    <div style={{display:"flex", gap:6, marginBottom:6, flexWrap:"wrap"}}>
+                      <button onClick={()=>{ setUseBLE(true); const f="80mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="80mm"?T.accent:T.surface2, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="80mm"?T.bg:T.text}}>🖨️ Thermique 80mm</button>
+                      <button onClick={()=>{ setUseBLE(true); const f="57mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="57mm"?T.accent:T.surface2, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="57mm"?T.bg:T.text}}>🖨️ Thermique 57mm</button>
+                      <button onClick={()=>setUseBLE(false)} style={{flex:"1 0 auto", background:!useBLE?T.accent:T.surface2, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:!useBLE?T.bg:T.text}}>🖥️ Navigateur</button>
+                    </div>
+                    <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", background:T.surface2, borderRadius:10, padding:"7px 10px"}}>
+                      <label style={{fontSize:11, color:T.textMute, display:"flex", alignItems:"center", gap:6}}>💵 Ouverture auto du tiroir-caisse à chaque vente</label>
+                      <input type="checkbox" checked={autoCashDrawer} onChange={e=>{setAutoCashDrawer(e.target.checked); localStorage.setItem("pos_auto_drawer", e.target.checked?"1":"0");}} />
+                    </div>
+                  </div>
+                )}
+              </div>
+              <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} currentCaissier={currentCaissier} loginCaissier={loginCaissier} caissiers={caissiers} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
+              {/* Spacer so FAB doesn't cover last product card */}
+              <div style={{height:80}} />
             </div>
-          )}
-          {caissDash && currentCaissier && (
-            <CaissierDashboard T={T} caissier={currentCaissier} sales={sales} onClose={()=>setCaissDash(false)} />
-          )}
-          <div className="desktop-main" style={{flex:1, overflowY:"auto", padding:12}}>
-            <BLEStatus T={T} connType={printerConnType} setConnType={(v)=>{setPrinterConnType(v); localStorage.setItem("pos_printer_conn", v);}} />
-            <div style={{display:"flex", gap:6, marginBottom:6, flexWrap:"wrap"}}>
-              <button onClick={()=>{ setUseBLE(true); const f="80mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="80mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="80mm"?T.bg:T.text}}>🖨️ Thermique 80mm</button>
-              <button onClick={()=>{ setUseBLE(true); const f="57mm"; setTicketFormat(f); localStorage.setItem("pos_ticket_fmt",f); }} style={{flex:"1 0 auto", background:useBLE&&ticketFormat==="57mm"?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:useBLE&&ticketFormat==="57mm"?T.bg:T.text}}>🖨️ Thermique 57mm</button>
-              <button onClick={()=>setUseBLE(false)} style={{flex:"1 0 auto", background:!useBLE?T.accent:T.surface, borderRadius:12, padding:6, fontSize:11, fontWeight:600, color:!useBLE?T.bg:T.text}}>🖥️ Navigateur</button>
-            </div>
-            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", background:T.surface, borderRadius:10, padding:"7px 10px", marginBottom:8}}>
-              <label style={{fontSize:11, color:T.textMute, display:"flex", alignItems:"center", gap:6}}>💵 Ouverture auto du tiroir-caisse à chaque vente</label>
-              <input type="checkbox" checked={autoCashDrawer} onChange={e=>{setAutoCashDrawer(e.target.checked); localStorage.setItem("pos_auto_drawer", e.target.checked?"1":"0");}} />
-            </div>
-            <CaisseContent T={T} products={products} addSale={addSale} items={items} setItems={setItems} total={total} flashMsg={flashMsg} sales={sales} cancelSale={cancelSale} shopId={session.shopId} currentCaissier={currentCaissier} loginCaissier={loginCaissier} caissiers={caissiers} shopName={shopName} shopPhone={shopPhone} shopAddress={shopAddress} shopSlogan={shopSlogan} shopLogo={shopLogo} useBLE={useBLE} printerConnType={printerConnType} ticketFormat={ticketFormat} nbCopies={nbCopies} ticketFooter={ticketFooter} />
-            {/* Spacer so FAB doesn't cover last product card */}
-            <div style={{height:80}} />
           </div>
 
           {/* ── Desktop sidebar (hidden on mobile/tablet via CSS) ── */}
