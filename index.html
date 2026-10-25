@@ -1745,6 +1745,159 @@ function waLink(shop, text) {
 // Avec la persistance Firestore, update() ne se résout qu'à l'accusé serveur : on n'attend pas indéfiniment.
 const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res("timeout"), ms || 10000))]);
 
+// ── Mot de passe de connexion : encodage compatible avec l'existant ──
+// (btoa tel quel pour le latin-1 ; repli UTF-8 pour les caractères hors latin-1, qui faisaient planter btoa)
+const encPwd = (p) => { try { return btoa(p); } catch (e) { return btoa(unescape(encodeURIComponent(p))); } };
+const decodePwd = (enc) => {
+  if (!enc) return "";
+  try { const raw = atob(enc); try { return decodeURIComponent(escape(raw)); } catch (e) { return raw; } } catch (e) { return ""; }
+};
+function randomPassword(len) {
+  const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans 0/O/1/l/I
+  const a = new Uint32Array(len || 8); crypto.getRandomValues(a);
+  return Array.from(a, x => chars[x % chars.length]).join("");
+}
+
+// ── Recherche produits (Stock / Réappro) ──
+const matchProd = (p, q) => {
+  const t = normTxt(String(q || "").trim());
+  if (!t) return true;
+  return normTxt(p.name).includes(t) || normTxt(p.category).includes(t) || String(p.barcode || "").includes(String(q).trim());
+};
+function ProdSearch({ T, value, onChange, shown, total, placeholder }) {
+  return (
+    <div style={{ position: "sticky", top: 0, zIndex: 5, background: T.bg, paddingBottom: 8 }}>
+      <div style={{ position: "relative" }}>
+        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, opacity: .6, pointerEvents: "none" }}>🔍</span>
+        <input value={value} onChange={e => onChange(e.target.value)} enterKeyHint="search"
+          placeholder={placeholder || "Rechercher un produit, une catégorie, un code-barres…"}
+          style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.inputBd}`, borderRadius: 12, padding: "10px 36px", color: T.text, fontSize: 13 }} />
+        {value && <button onClick={() => onChange("")} aria-label="Effacer la recherche"
+          style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: T.textMute, fontSize: 16, width: 30, height: 30 }}>✕</button>}
+      </div>
+      {value && <div style={{ fontSize: 10, color: T.textMute, marginTop: 4 }}>{shown} résultat{shown > 1 ? "s" : ""} sur {total}</div>}
+    </div>
+  );
+}
+
+function PasswordRow({ T, shop, flashMsg, onSave }) {
+  const [show, setShow] = useState(false);
+  const [edit, setEdit] = useState(false);
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const cur = decodePwd(shop.password);
+  const save = async (pwd) => {
+    const p = pwd !== undefined ? pwd : val;
+    if (p.length < 4) { flashMsg("Mot de passe trop court (4 caractères minimum)"); return; }
+    if (p.length < 6 && !window.confirm("Mot de passe court (moins de 6 caractères). L'utiliser quand même ?")) return;
+    setBusy(true);
+    try {
+      const r = await withTimeout(onSave(p));
+      flashMsg(r === "timeout" ? "⏳ Pas de réseau — modification appliquée dès la reconnexion" : "✅ Mot de passe modifié");
+      setEdit(false); setVal(""); setShow(true);
+    } catch (e) { flashMsg("Erreur : " + (e.message || e)); }
+    setBusy(false);
+  };
+  const sendWa = () => {
+    if (!cur) { flashMsg("Aucun mot de passe à envoyer"); return; }
+    const txt = `Bonjour ${shop.ownerName || ""}, vos identifiants de connexion :\nCommerce : ${shop.shopName || ""}\nMot de passe : ${cur}\nGardez-les confidentiels.`;
+    window.open(waLink(shop, txt), "_blank");
+  };
+  const smallBtn = { background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "5px 9px", fontSize: 11, fontWeight: 600, color: T.text };
+  return (
+    <div style={{ background: T.surface2, borderRadius: 12, padding: 10, marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, fontWeight: 700 }}>🔐 Mot de passe de connexion</div>
+        <span style={{ fontSize: 9, fontWeight: 700, background: (cur ? T.green : T.orange) + "22", color: cur ? T.green : T.orange, borderRadius: 6, padding: "2px 7px" }}>{cur ? "✅ Défini" : "Non défini"}</span>
+      </div>
+      <div style={{ fontSize: 10, color: T.textMute, marginBottom: 6 }}>Connexion avec le nom exact du commerce : <strong style={{ color: T.text }}>{shop.shopName || "—"}</strong></div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 17, fontWeight: 800, letterSpacing: 1, minWidth: 90, wordBreak: "break-all" }}>
+          {cur ? (show ? cur : "•".repeat(Math.min(cur.length, 14))) : "—"}
+        </div>
+        {cur && <button onClick={() => setShow(v => !v)} style={smallBtn}>{show ? "🙈 Masquer" : "👁 Voir"}</button>}
+      </div>
+      {!edit ? (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => { setEdit(true); setVal(""); }} style={smallBtn}>✏️ Modifier</button>
+          <button disabled={busy} onClick={() => { const p = randomPassword(8); if (window.confirm(`Générer le nouveau mot de passe « ${p} » ?`)) save(p); }} style={smallBtn}>🎲 Générer</button>
+          {cur && <button onClick={sendWa} style={{ ...smallBtn, color: T.green }}>📲 WhatsApp</button>}
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input autoFocus type="text" autoCapitalize="off" autoCorrect="off" value={val} onChange={e => setVal(e.target.value)} placeholder="Nouveau mot de passe"
+            style={{ flex: 1, minWidth: 0, background: T.inputBg, border: `1px solid ${T.inputBd}`, borderRadius: 10, padding: "8px 10px", color: T.text, fontFamily: "'DM Mono',monospace", fontSize: 14 }} />
+          <button onClick={() => setVal(randomPassword(8))} title="Générer" style={smallBtn}>🎲</button>
+          <button disabled={busy} onClick={() => save()} style={{ background: T.accent, border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 800, color: T.bg }}>{busy ? "⏳" : "OK"}</button>
+          <button onClick={() => setEdit(false)} style={{ background: "transparent", border: "none", color: T.textMute, fontSize: 14 }}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Changement du mot de passe de connexion par le propriétaire ─────
+function ChangePasswordModal({ T, shopId, flashMsg, onClose }) {
+  const [oldPwd, setOldPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [fails, setFails] = useState(0);
+  const [lockUntil, setLockUntil] = useState(0);
+
+  const submit = async () => {
+    setError("");
+    if (Date.now() < lockUntil) { setError("Trop d'essais — patientez quelques secondes."); return; }
+    if (!db || !navigator.onLine) { setError("Connexion internet requise pour changer le mot de passe."); return; }
+    if (!oldPwd) { setError("Saisissez l'ancien mot de passe."); return; }
+    if (newPwd.length < 6) { setError("Nouveau mot de passe : 6 caractères minimum."); return; }
+    if (newPwd === oldPwd) { setError("Le nouveau mot de passe doit être différent de l'ancien."); return; }
+    if (newPwd !== confirmPwd) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setBusy(true);
+    try {
+      const ref = db.collection("shops").doc(shopId);
+      const snap = await ref.get({ source: "server" });
+      const stored = snap.exists ? snap.data().password : null;
+      if (!stored || encPwd(oldPwd) !== stored) {
+        const n = fails + 1; setFails(n);
+        if (n >= 5) { setLockUntil(Date.now() + 30000); setFails(0); setError("5 erreurs — réessayez dans 30 secondes."); }
+        else setError(`Ancien mot de passe incorrect (${n}/5).`);
+        setBusy(false); return;
+      }
+      const r = await withTimeout(ref.update({ password: encPwd(newPwd) }), 10000);
+      if (r === "timeout") { setError("Connexion instable : enregistrement non confirmé. Vérifiez le réseau puis réessayez."); setBusy(false); return; }
+      flashMsg("✅ Mot de passe modifié — utilisez-le à la prochaine connexion");
+      onClose();
+    } catch (e) {
+      setError("Erreur : " + (e.message || e));
+    }
+    setBusy(false);
+  };
+
+  const inp = { width: "100%", background: T.inputBg, border: `1px solid ${T.inputBd}`, borderRadius: 12, padding: 12, marginBottom: 8, color: T.text, fontSize: 14 };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "20px 0", overflowY: "auto" }}>
+      <div style={{ background: T.surface, borderRadius: 24, padding: 20, width: "90%", maxWidth: 360 }}>
+        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>🔐 Mot de passe de connexion</div>
+        <div style={{ fontSize: 11, color: T.textMute, marginBottom: 12 }}>Utilisé avec le nom du commerce pour ouvrir une session sur un appareil.</div>
+        <input type={show ? "text" : "password"} autoComplete="current-password" placeholder="Ancien mot de passe" value={oldPwd} onChange={e => setOldPwd(e.target.value)} style={inp} />
+        <input type={show ? "text" : "password"} autoComplete="new-password" placeholder="Nouveau mot de passe (6 caractères min.)" value={newPwd} onChange={e => setNewPwd(e.target.value)} style={inp} />
+        <input type={show ? "text" : "password"} autoComplete="new-password" placeholder="Confirmer le nouveau mot de passe" value={confirmPwd} onChange={e => setConfirmPwd(e.target.value)} style={inp} />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.textMute, marginBottom: 10 }}>
+          <input type="checkbox" checked={show} onChange={e => setShow(e.target.checked)} /> Afficher les mots de passe
+        </label>
+        {error && <div style={{ background: T.red + "18", border: `1px solid ${T.red}55`, color: T.red, borderRadius: 10, padding: "8px 10px", fontSize: 11, marginBottom: 10 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onClose} style={{ flex: 1, background: T.surface2, borderRadius: 12, padding: 12, border: "none", color: T.text }}>Annuler</button>
+          <button disabled={busy} onClick={submit} style={{ flex: 1, background: T.accent, borderRadius: 12, padding: 12, border: "none", fontWeight: 700, color: T.bg, opacity: busy ? 0.6 : 1 }}>{busy ? "⏳..." : "Enregistrer"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PinRow({ T, icon, label, encoded, showDefaultWarn, onSave, onClear, shop, flashMsg }) {
   const [show, setShow] = useState(false);
   const [edit, setEdit] = useState(false);
@@ -1833,12 +1986,17 @@ function PinManagerModal({ T, shop, admins, onClose, flashMsg }) {
       <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 520, maxHeight: "92dvh", overflowY: "auto", padding: 16, paddingBottom: 28 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 800 }}>🔑 PIN du commerce</div>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>🔑 Accès du commerce</div>
             <div style={{ fontSize: 11, color: T.textMute }}>{shop.shopName || shop.id}{shop.ownerName ? ` · ${shop.ownerName}` : ""}</div>
           </div>
           <button onClick={onClose} style={{ background: T.surface2, border: "none", borderRadius: 20, width: 32, height: 32, fontSize: 16, color: T.text }}>✕</button>
         </div>
 
+        <div style={{ fontSize: 11, fontWeight: 800, color: T.textMute, margin: "2px 0 6px", letterSpacing: ".5px" }}>CONNEXION</div>
+        <PasswordRow T={T} shop={shop} flashMsg={flashMsg}
+          onSave={async p => { await shopRef.update({ password: encPwd(p) }); logPin("password"); }} />
+
+        <div style={{ fontSize: 11, fontWeight: 800, color: T.textMute, margin: "14px 0 6px", letterSpacing: ".5px" }}>PIN</div>
         <PinRow T={T} shop={shop} flashMsg={flashMsg} icon="👑" label="PIN administrateur" encoded={shop.adminPin} showDefaultWarn
           onSave={async p => { await shopRef.update({ adminPin: btoa(p) }); logPin("admin"); }} />
         <PinRow T={T} shop={shop} flashMsg={flashMsg} icon="📋" label="PIN gérant" encoded={shop.gerantPin}
@@ -1859,7 +2017,7 @@ function PinManagerModal({ T, shop, admins, onClose, flashMsg }) {
         ))}
 
         <div style={{ background: T.surface2, borderRadius: 10, padding: 10, marginTop: 12, fontSize: 10, color: T.textMute, lineHeight: 1.5 }}>
-          ℹ️ Les nouveaux PIN s'appliquent aux appareils connectés dès la synchronisation. Le PIN comptable est enregistré sur l'appareil du commerce : il ne peut pas être géré à distance.
+          ℹ️ Le nouveau mot de passe est demandé à la prochaine connexion (les appareils déjà connectés restent ouverts). Les nouveaux PIN s'appliquent aux appareils connectés dès la synchronisation. Le PIN comptable est enregistré sur l'appareil du commerce : il ne peut pas être géré à distance.
         </div>
       </div>
     </div>
@@ -2048,7 +2206,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
   const expiringShops = shops.filter(s => { const d = getDaysLeft(s.subscriptionEnd); return d <= 7 && d > 0; }).length;
   const expiredShops = shops.filter(s => getDaysLeft(s.subscriptionEnd) === 0 && s.active !== false).length;
 
-  const TABS = [["shops","🏪 Commerces"],["pins","🔑 PIN" + (defaultPinCount > 0 ? ` (${defaultPinCount}⚠️)` : "")],["admins","👥 Admins"],["activites","📊 Activités"],["settings","⚙️ Paramètres"]];
+  const TABS = [["shops","🏪 Commerces"],["pins","🔑 Accès" + (defaultPinCount > 0 ? ` (${defaultPinCount}⚠️)` : "")],["admins","👥 Admins"],["activites","📊 Activités"],["settings","⚙️ Paramètres"]];
 
   return (
     <div className="dev-dash-root" style={{ background:T.bg, color:T.text }}>
@@ -2169,7 +2327,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
                       </button>
                       <button onClick={() => setPinShopId(shop.id)}
                         style={{ background: isDefaultAdminPin(shop) ? T.red + "22" : T.surface2, border:`1px solid ${isDefaultAdminPin(shop) ? T.red + "66" : T.border}`, borderRadius:8, padding:"5px 12px", fontSize:11, fontWeight:700, color: isDefaultAdminPin(shop) ? T.red : T.text }}>
-                        🔑 Gérer les PIN{isDefaultAdminPin(shop) ? " ⚠️" : ""}
+                        🔑 Mot de passe & PIN{isDefaultAdminPin(shop) ? " ⚠️" : ""}
                       </button>
                     </div>
                   </div>
@@ -2197,7 +2355,7 @@ function SuperAdminDashboard({ T, themeName, setThemeName, logout, flashMsg }) {
         {tab === "pins" && (
           <div>
             <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 10, fontSize: 11, color: T.textMute, lineHeight: 1.5 }}>
-              🔑 Consultez, réinitialisez ou envoyez par WhatsApp les PIN de chaque commerce (administrateur, gérant, caissiers). Les PIN « par défaut » (0000) sont signalés : conseillez au propriétaire de les changer.
+              🔑 Consultez, réinitialisez ou envoyez par WhatsApp le mot de passe de connexion et les PIN de chaque commerce (administrateur, gérant, caissiers). Les PIN « par défaut » (0000) sont signalés : conseillez au propriétaire de les changer.
             </div>
             <input value={pinQuery} onChange={e => setPinQuery(e.target.value)} placeholder="🔍 Rechercher un commerce…"
               style={{ width: "100%", background: T.inputBg, border: `1px solid ${T.inputBd}`, borderRadius: 12, padding: 10, color: T.text, marginBottom: 8 }} />
@@ -3728,7 +3886,7 @@ function App() {
       const now = Date.now();
       await db.collection("shops").doc(shopId).set({ 
         shopName: authShopName.trim(), ownerName: authOwnerName.trim(), whatsapp: authWhatsapp.trim(), phone: authPhone.trim(), 
-        password: btoa(authPassword), createdAt: now, active: true, plan: "mensuel", 
+        password: encPwd(authPassword), createdAt: now, active: true, plan: "mensuel", 
         subscriptionStart: now, subscriptionEnd: calculateEndDate(now, "mensuel"),
         adminPin: btoa("0000"), logoBase64: null
       });
@@ -3749,7 +3907,7 @@ function App() {
       if(query.empty) throw new Error("Commerce introuvable");
       const doc = query.docs[0];
       const data = doc.data();
-      if(btoa(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
+      if(encPwd(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
       if(data.active === false) throw new Error("Compte désactivé");
       if(data.sessionActive === false) throw new Error("Session suspendue par l'administrateur — contactez le support");
       const newSession = { 
@@ -5949,6 +6107,10 @@ function SectionVentes({ T, sales, hasBeneficeData }) {
 //  GÉRANT CONTENT — Stats + Stock (sans PIN)
 // ══════════════════════════════════════════════════════════════════
 function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, updateStock, shopName, commandes, addCommande, payCommande, deleteCommande, shopPhone, shopAddress, shopSlogan, shopLogo, useBLE, printerConnType, ticketFormat, nbCopies, ticketFooter }) {
+  const [stockQ, setStockQ] = useState("");
+  const [reapQ, setReapQ] = useState("");
+  const trackedProds = products.filter(p => p.stock !== undefined && p.stock !== null && p.stock !== -1);
+  const lowFilteredG = trackedProds.filter(p => p.stock <= 5 && matchProd(p, reapQ));
   const [tab, setTab] = useState("stats");
 
   // ── Stats du jour ──────────────────────────────────────────────
@@ -6061,7 +6223,9 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
         <div>
           <div style={{marginBottom:16}}>
             <div style={{fontSize:12, fontWeight:600, marginBottom:8}}>📦 Niveaux de stock</div>
-            {products.filter(p=>p.active!==false).map(p=>(
+            <ProdSearch T={T} value={stockQ} onChange={setStockQ} shown={products.filter(p=>p.active!==false&&matchProd(p,stockQ)).length} total={products.filter(p=>p.active!==false).length} />
+            {stockQ && products.filter(p=>p.active!==false&&matchProd(p,stockQ)).length===0 && <div style={{textAlign:"center", padding:20, color:T.textMute, fontSize:12}}>Aucun produit ne correspond à « {stockQ} »</div>}
+            {products.filter(p=>p.active!==false&&matchProd(p,stockQ)).map(p=>(
               <div key={p.id} style={{background:T.surface, borderRadius:12, padding:12, marginBottom:8}}>
                 <div style={{display:"flex", justifyContent:"space-between"}}><span style={{fontWeight:600}}>{p.name}</span><span style={{color:T.textMute, fontSize:12}}>{fmtPrice(p.price)}</span></div>
                 <div style={{marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
@@ -6091,12 +6255,15 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
       {/* ── RÉAPPRO ── */}
       {tab==="reappro" && (
         <div>
+          <ProdSearch T={T} value={reapQ} onChange={setReapQ} placeholder="Rechercher un produit à réapprovisionner…"
+            shown={products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).length}
+            total={products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1).length} />
           <div style={{background:T.surface, borderRadius:16, padding:14, marginBottom:12}}>
             <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>🔄 Produits à réapprovisionner</div>
             <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Stock ≤ 5 unités</div>
-            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5).length===0
-              ? <div style={{color:T.green, fontSize:12}}>✅ Tous les stocks sont OK</div>
-              : products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5).map(p=>(
+            {lowFilteredG.length===0
+              ? <div style={{color:reapQ?T.textMute:T.green, fontSize:12}}>{reapQ ? "Aucun produit en stock bas ne correspond" : "✅ Tous les stocks sont OK"}</div>
+              : lowFilteredG.map(p=>(
                   <div key={p.id} style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
                     <div>
                       <div style={{fontWeight:600}}>{p.name}</div>
@@ -6109,7 +6276,8 @@ function GerantContent({ T, products, sales, flashMsg, shopId, stockMovements, u
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:14}}>
             <div style={{fontSize:13, fontWeight:700, marginBottom:10}}>📦 Réapprovisionner n'importe quel produit</div>
-            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1).map(p=>(
+            {reapQ && products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).length===0 && <div style={{textAlign:"center", padding:16, color:T.textMute, fontSize:12}}>Aucun produit ne correspond à « {reapQ} »</div>}
+            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).map(p=>(
               <div key={p.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:`1px solid ${T.border}`}}>
                 <span style={{fontSize:12}}>{p.name} <span style={{color:T.textMute}}>({p.stock})</span></span>
                 <button onClick={()=>{const q=prompt(`Quantité à ajouter pour ${p.name} ?`); if(q&&parseInt(q)>0) updateStock(p.id, parseInt(q), "entree", "Réappro gérant");}} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"3px 10px", fontSize:11, color:T.green}}>+ Stock</button>
@@ -6329,6 +6497,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
   const [showPinForm, setShowPinForm] = useState(false);
   const [newPin, setNewPin] = useState(""); const [newPinConfirm, setNewPinConfirm] = useState("");
   const [showGerantPinForm, setShowGerantPinForm] = useState(false);
+  const [showPwdForm, setShowPwdForm] = useState(false);
   const [newGerantPin, setNewGerantPin] = useState(""); const [newGerantPinConfirm, setNewGerantPinConfirm] = useState("");
   const [payModal, setPayModal] = useState(null); const [payAmount, setPayAmount] = useState("");
   const [cName, setCName] = useState(""); const [cPin, setCPin] = useState(""); const [showCaisForm, setShowCaisForm] = useState(false);
@@ -6665,6 +6834,9 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
 
   // ── Réappro ────────────────────────────────────────────────────────
   const lowStockProds = products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&p.stock<=5);
+  const [stockQ, setStockQ] = useState("");
+  const [reapQ, setReapQ] = useState("");
+  const lowFilteredA = lowStockProds.filter(p => matchProd(p, reapQ));
   const reappro = async (prodId, qty) => { const n=parseInt(qty); if(n>0) await updateStock(prodId, n, "entree", "Réapprovisionnement"); };
 
   const allCats = Array.from(new Set(products.map(p=>p.category).filter(Boolean)));
@@ -6919,7 +7091,9 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
       {tab==="stock" && (
         <div>
           <div style={{marginBottom:16}}><div style={{fontSize:12, fontWeight:600, marginBottom:8}}>📦 Niveaux de stock</div>
-            {products.filter(p=>p.active!==false).map(p=>(
+            <ProdSearch T={T} value={stockQ} onChange={setStockQ} shown={products.filter(p=>p.active!==false&&matchProd(p,stockQ)).length} total={products.filter(p=>p.active!==false).length} />
+            {stockQ && products.filter(p=>p.active!==false&&matchProd(p,stockQ)).length===0 && <div style={{textAlign:"center", padding:20, color:T.textMute, fontSize:12}}>Aucun produit ne correspond à « {stockQ} »</div>}
+            {products.filter(p=>p.active!==false&&matchProd(p,stockQ)).map(p=>(
               <div key={p.id} style={{background:T.surface, borderRadius:12, padding:12, marginBottom:8}}>
                 <div style={{display:"flex", justifyContent:"space-between"}}><span>{p.name}</span><span>{fmtPrice(p.price)}</span></div>
                 <div style={{marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
@@ -6945,11 +7119,14 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
       {/* ── RÉAPPRO ── */}
       {tab==="reappro" && (
         <div>
+          <ProdSearch T={T} value={reapQ} onChange={setReapQ} placeholder="Rechercher un produit à réapprovisionner…"
+            shown={products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).length}
+            total={products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1).length} />
           <div style={{background:T.surface, borderRadius:16, padding:14, marginBottom:12}}>
             <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>🔄 Produits à réapprovisionner</div>
             <div style={{fontSize:11, color:T.textMute, marginBottom:12}}>Stock ≤ 5 unités</div>
-            {lowStockProds.length===0 ? <div style={{color:T.green, fontSize:12}}>✅ Tous les stocks sont OK</div> :
-              lowStockProds.map(p=>(
+            {lowFilteredA.length===0 ? <div style={{color:reapQ?T.textMute:T.green, fontSize:12}}>{reapQ ? "Aucun produit en stock bas ne correspond" : "✅ Tous les stocks sont OK"}</div> :
+              lowFilteredA.map(p=>(
                 <div key={p.id} style={{background:T.surface2, borderRadius:12, padding:12, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
                   <div>
                     <div style={{fontWeight:600}}>{p.name}</div>
@@ -6962,7 +7139,8 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:14}}>
             <div style={{fontSize:13, fontWeight:700, marginBottom:10}}>📦 Réapprovisionner n'importe quel produit</div>
-            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1).map(p=>(
+            {reapQ && products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).length===0 && <div style={{textAlign:"center", padding:16, color:T.textMute, fontSize:12}}>Aucun produit ne correspond à « {reapQ} »</div>}
+            {products.filter(p=>p.stock!==undefined&&p.stock!==null&&p.stock!==-1&&matchProd(p,reapQ)).map(p=>(
               <div key={p.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:`1px solid ${T.border}`}}>
                 <span style={{fontSize:12}}>{p.name} <span style={{color:T.textMute}}>({p.stock})</span></span>
                 <button onClick={()=>{const q=prompt(`Quantité à ajouter pour ${p.name} ?`); if(q&&parseInt(q)>0) reappro(p.id, q);}} style={{background:T.btnGreen.bg, border:"none", borderRadius:8, padding:"3px 10px", fontSize:11}}>+ Stock</button>
@@ -7200,6 +7378,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
             </button>
             {session&&session.gerantPin&&<div style={{fontSize:10,color:T.green,marginTop:6,textAlign:"center"}}>✅ PIN gérant actif</div>}
             {session&&!session.gerantPin&&<div style={{fontSize:10,color:T.orange,marginTop:6,textAlign:"center"}}>⚠️ Aucun PIN gérant défini</div>}
+            <button onClick={()=>setShowPwdForm(true)} style={{background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:12, width:"100%", fontWeight:600, color:T.text, marginTop:12}}>🔐 Changer le mot de passe de connexion</button>
           </div>
           <div style={{background:T.surface, borderRadius:16, padding:16, marginBottom:12}}>
             <div style={{fontSize:14, fontWeight:700, marginBottom:12}}>📤 Export données</div>
@@ -7255,6 +7434,7 @@ function OwnerContent({ T, shopName, shopPhone, shopAddress, shopSlogan, setShop
           </div>
         </div>
       )}
+      {showPwdForm && <ChangePasswordModal T={T} shopId={shopId} flashMsg={flashMsg} onClose={()=>setShowPwdForm(false)} />}
       {showGerantPinForm && (
         <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.9)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000}}>
           <div style={{background:T.surface, borderRadius:24, padding:20, width:"90%", maxWidth:360}}>
