@@ -296,14 +296,81 @@ function calculateEndDateDays(startDate, days) { const end = new Date(startDate)
 function planLabel(plan) { switch(plan) { case "mensuel": return "MENSUEL"; case "trimestriel": return "TRIMESTRIEL"; case "annuel": return "ANNUEL"; case "personnalise": return "PERSONNALISÉ"; default: return "MENSUEL"; } }
 function getStoreKey(shopId, type) { return `pos_${shopId}_${type}`; }
 
+// ── Photos produits : IndexedDB (quota bien plus grand que localStorage) ──
+// localStorage (~5 Mo) sert à l'affichage instantané ; les grosses photos sont gardées ici.
+const PhotoCache = {
+  _p: null,
+  _sig: {},
+  _open() {
+    if (PhotoCache._p) return PhotoCache._p;
+    PhotoCache._p = new Promise((res, rej) => {
+      try {
+        const r = indexedDB.open("caissepro_photos", 1);
+        r.onupgradeneeded = () => { r.result.createObjectStore("p"); };
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      } catch (e) { rej(e); }
+    });
+    return PhotoCache._p;
+  },
+  async getAll(shopId) {
+    const db = await PhotoCache._open();
+    return new Promise((res) => {
+      const out = {}; const pre = shopId + ":";
+      try {
+        const rq = db.transaction("p", "readonly").objectStore("p").openCursor();
+        rq.onsuccess = () => { const c = rq.result; if (!c) return res(out); const k = String(c.key); if (k.startsWith(pre)) out[k.slice(pre.length)] = c.value; c.continue(); };
+        rq.onerror = () => res(out);
+      } catch (e) { res(out); }
+    });
+  },
+  // Aligne le cache sur la liste complète des produits (photos ajoutées / supprimées)
+  async replace(shopId, prods) {
+    try {
+      const db = await PhotoCache._open();
+      const pre = shopId + ":";
+      const keep = new Set(prods.filter(p => p && (p.photo || p._ph)).map(p => p.id));
+      const st = db.transaction("p", "readwrite").objectStore("p");
+      const rq = st.openCursor();
+      rq.onsuccess = () => { const c = rq.result; if (!c) return; const k = String(c.key); if (k.startsWith(pre) && !keep.has(k.slice(pre.length))) c.delete(); c.continue(); };
+      prods.forEach(p => {
+        if (!p || !p.photo) return;
+        const sig = p.photo.length + ":" + p.photo.slice(-24);
+        if (PhotoCache._sig[pre + p.id] !== sig) { st.put(p.photo, pre + p.id); PhotoCache._sig[pre + p.id] = sig; }
+      });
+    } catch (e) {}
+  },
+};
+
 class OfflineStore {
   static get(shopId, type) { try { const d = localStorage.getItem(getStoreKey(shopId, type)); return d ? JSON.parse(d) : []; } catch(e){ return []; } }
+  // Copie locale tronquée aux N derniers jours (ventes / mouvements) pour libérer de la place
+  static _trim(shopId, type, days) {
+    try {
+      const k = getStoreKey(shopId, type);
+      const lim = Date.now() - days * 864e5;
+      const cur = JSON.parse(localStorage.getItem(k) || "[]");
+      localStorage.setItem(k, JSON.stringify(cur.filter(x => (x.timestamp || 0) >= lim)));
+    } catch(e) {}
+  }
   static set(shopId, type, data) {
     const key = getStoreKey(shopId, type);
     let arr = data || [];
+    if (type === "products") {
+      // Le catalogue doit TOUJOURS pouvoir s'afficher hors ligne : on garde l'essentiel en localStorage
+      // (photos lourdes -> IndexedDB) et on libère de la place si le quota est atteint.
+      try { PhotoCache.replace(shopId, arr); } catch(e) {}
+      const light = arr.map(p => (p && p.photo && p.photo.length > 6000) ? { ...p, photo: null, _ph: 1 } : p);
+      try { localStorage.setItem(key, JSON.stringify(light)); return; } catch(e) {}
+      OfflineStore._trim(shopId, "sales", 30); OfflineStore._trim(shopId, "stock_movements", 30);
+      try { localStorage.setItem(key, JSON.stringify(light)); return; } catch(e) {}
+      try { localStorage.setItem(key, JSON.stringify(arr.map(p => p ? { ...p, photo: null, _ph: p.photo || p._ph ? 1 : undefined } : p))); return; } catch(e) {}
+      window.__posQuotaWarn = true;
+      return;
+    }
     try { localStorage.setItem(key, JSON.stringify(arr)); }
     catch(e) {
-      // Quota localStorage atteint : on n'garde en local que les 90 derniers jours
+      // Quota localStorage atteint : on garde en local les 90 derniers jours
       // (Firestore conserve tout, ce n'est qu'une copie de secours hors ligne).
       try {
         if (type === "sales" || type === "stock_movements") {
@@ -336,6 +403,77 @@ const SessionStore = {
   clear: () => { try { localStorage.removeItem(SESSION_KEY); } catch(e) {} },
 };
 
+
+// ── Connexion hors ligne : identifiants vérifiables localement ─────────────
+// Après une connexion réussie EN LIGNE, l'appareil garde une empreinte du mot de passe
+// (PBKDF2-SHA256 + sel aléatoire, jamais le mot de passe lui-même) et un instantané de la session.
+// Sans internet, on compare l'empreinte pour rouvrir le commerce.
+const CREDS_KEY = "pos_offline_creds_v1";
+const CREDS_FAIL_KEY = "pos_offline_fails_v1";
+const OfflineCreds = {
+  available: () => !!(window.crypto && window.crypto.subtle && window.TextEncoder),
+  _norm: (n) => String(n || "").trim().toLowerCase().normalize("NFC"),
+  _load: () => { try { return JSON.parse(localStorage.getItem(CREDS_KEY) || "{}") || {}; } catch (e) { return {}; } },
+  _store: (o) => { try { localStorage.setItem(CREDS_KEY, JSON.stringify(o)); } catch (e) {} },
+  _b64: (buf) => { let s = ""; new Uint8Array(buf).forEach(b => { s += String.fromCharCode(b); }); return btoa(s); },
+  _unb64: (str) => Uint8Array.from(atob(str), c => c.charCodeAt(0)),
+  _derive: async (pwd, salt) => {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(String(pwd)), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 60000, hash: "SHA-256" }, key, 256);
+    return OfflineCreds._b64(bits);
+  },
+  _sha: async (str) => OfflineCreds._b64(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(str || "")))),
+  count: () => Object.keys(OfflineCreds._load()).length,
+  save: async (shopName, password, session, serverPwd) => {
+    if (!OfflineCreds.available()) return;
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const entry = { shopId: session.shopId, salt: OfflineCreds._b64(salt), hash: await OfflineCreds._derive(password, salt), srv: await OfflineCreds._sha(serverPwd), session, savedAt: Date.now() };
+    const all = OfflineCreds._load();
+    all[OfflineCreds._norm(shopName)] = entry;
+    const keys = Object.keys(all);   // 8 commerces maximum par appareil
+    if (keys.length > 8) keys.sort((a, b) => all[a].savedAt - all[b].savedAt).slice(0, keys.length - 8).forEach(k => { delete all[k]; });
+    OfflineCreds._store(all);
+  },
+  verify: async (shopName, password) => {
+    if (!OfflineCreds.available()) return { ok: false, reason: "unsupported" };
+    const e = OfflineCreds._load()[OfflineCreds._norm(shopName)];
+    if (!e) return { ok: false, reason: "unknown" };
+    const h = await OfflineCreds._derive(password, OfflineCreds._unb64(e.salt));
+    return h === e.hash ? { ok: true, session: e.session } : { ok: false, reason: "wrong" };
+  },
+  removeByShopId: (shopId) => {
+    const all = OfflineCreds._load();
+    Object.keys(all).forEach(k => { if (all[k].shopId === shopId) delete all[k]; });
+    OfflineCreds._store(all);
+  },
+  clearAll: () => { try { localStorage.removeItem(CREDS_KEY); localStorage.removeItem(CREDS_FAIL_KEY); } catch (e) {} },
+  // Le mot de passe a changé côté serveur : l'ancien ne doit plus ouvrir le commerce hors ligne
+  checkServer: async (shopId, serverPwd) => {
+    if (!OfflineCreds.available() || !serverPwd) return;
+    const srv = await OfflineCreds._sha(serverPwd);
+    const all = OfflineCreds._load();
+    let changed = false;
+    Object.keys(all).forEach(k => { if (all[k].shopId === shopId && all[k].srv !== srv) { delete all[k]; changed = true; } });
+    if (changed) OfflineCreds._store(all);
+  },
+  // Le propriétaire vient de changer son mot de passe sur cet appareil : on met l'empreinte à jour
+  updatePassword: async (shopId, newPwd, serverPwd) => {
+    if (!OfflineCreds.available()) return;
+    const all = OfflineCreds._load();
+    for (const k of Object.keys(all)) {
+      if (all[k].shopId !== shopId) continue;
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      all[k].salt = OfflineCreds._b64(salt);
+      all[k].hash = await OfflineCreds._derive(newPwd, salt);
+      all[k].srv = await OfflineCreds._sha(serverPwd);
+    }
+    OfflineCreds._store(all);
+  },
+  // Anti force brute : 5 erreurs → blocage 60 s (persistant, survit au rechargement)
+  lockLeft: () => { try { const f = JSON.parse(localStorage.getItem(CREDS_FAIL_KEY) || "{}"); return Math.max(0, Math.ceil(((f.until || 0) - Date.now()) / 1000)); } catch (e) { return 0; } },
+  fail: () => { try { const f = JSON.parse(localStorage.getItem(CREDS_FAIL_KEY) || "{}"); const n = (f.n || 0) + 1; localStorage.setItem(CREDS_FAIL_KEY, JSON.stringify(n >= 5 ? { n: 0, until: Date.now() + 60000 } : { n, until: f.until || 0 })); } catch (e) {} },
+  resetFails: () => { try { localStorage.removeItem(CREDS_FAIL_KEY); } catch (e) {} },
+};
 
 // ── Helpers logo ──────────────────────────────────────────────────────────
 function resizeLogoToBase64(src, maxW, maxH) {
@@ -396,32 +534,41 @@ async function logoToESCPOS(base64, maxWidth) {
 
 function syncShopData(shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers, setCommandes) {
   if(!db) return ()=>{};
+  // Hors ligne avec un cache Firestore vide, le 1er snapshot arrive « vide, depuis le cache » :
+  // on garde alors la copie locale au lieu de la remplacer par une liste vide.
+  const keepLocal = (snap, type) => !!(snap.metadata && snap.metadata.fromCache && snap.empty && OfflineStore.get(shopId, type).length > 0);
   const unsubProds = db.collection("shops").doc(shopId).collection("products").onSnapshot(snap => {
+    if (keepLocal(snap, "products")) return;
     const prods = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(p => p.id !== "_init");
     OfflineStore.set(shopId, "products", prods);
     setProducts && setProducts(prods);
   });
   const unsubSales = db.collection("shops").doc(shopId).collection("sales").onSnapshot(snap => {
+    if (keepLocal(snap, "sales")) return;
     const sales = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(s => s.id !== "_init");
     OfflineStore.set(shopId, "sales", sales);
     setSales && setSales(sales);
   });
   const unsubMovements = db.collection("shops").doc(shopId).collection("stock_movements").onSnapshot(snap => {
+    if (keepLocal(snap, "stock_movements")) return;
     const movements = snap.docs.map(d=>({id:d.id, ...d.data()}));
     OfflineStore.set(shopId, "stock_movements", movements);
     setStockMovements && setStockMovements(movements);
   });
   const unsubCredits = db.collection("shops").doc(shopId).collection("credits").onSnapshot(snap => {
+    if (keepLocal(snap, "credits")) return;
     const credits = snap.docs.map(d=>({id:d.id, ...d.data()}));
     OfflineStore.set(shopId, "credits", credits);
     setCredits && setCredits(credits);
   });
   const unsubCaissiers = db.collection("shops").doc(shopId).collection("caissiers").onSnapshot(snap => {
+    if (keepLocal(snap, "caissiers")) return;
     const caissiers = snap.docs.map(d=>({id:d.id, ...d.data()}));
     OfflineStore.set(shopId, "caissiers", caissiers);
     setCaissiers && setCaissiers(caissiers);
   });
   const unsubCommandes = db.collection("shops").doc(shopId).collection("commandes").onSnapshot(snap => {
+    if (keepLocal(snap, "commandes")) return;
     const commandes = snap.docs.map(d=>({id:d.id, ...d.data()}));
     OfflineStore.set(shopId, "commandes", commandes);
     setCommandes && setCommandes(commandes);
@@ -1868,6 +2015,7 @@ function ChangePasswordModal({ T, shopId, flashMsg, onClose }) {
       }
       const r = await withTimeout(ref.update({ password: encPwd(newPwd) }), 10000);
       if (r === "timeout") { setError("Connexion instable : enregistrement non confirmé. Vérifiez le réseau puis réessayez."); setBusy(false); return; }
+      OfflineCreds.updatePassword(shopId, newPwd, encPwd(newPwd)).catch(() => {});
       flashMsg("✅ Mot de passe modifié — utilisez-le à la prochaine connexion");
       onClose();
     } catch (e) {
@@ -3783,6 +3931,12 @@ function App() {
   });
   const [sessionRestored, setSessionRestored] = useState(() => !!SessionStore.load());
   const [reAuthPending, setReAuthPending] = useState(false);
+  const [netOnline, setNetOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setNetOnline(true), off = () => setNetOnline(false);
+    window.addEventListener("online", on); window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
   const [authMode, setAuthMode] = useState("login");
   const [authShopName, setAuthShopName] = useState("");
   const [authOwnerName, setAuthOwnerName] = useState("");
@@ -3901,26 +4055,58 @@ function App() {
 
   const handleLogin = async () => {
     if(!authShopName.trim() || !authPassword) { setAuthError("Nom et mot de passe requis"); return; }
-    setAuthLoading(true);
+    setAuthLoading(true); setAuthError("");
+    const finishLogin = (s, restored) => { SessionStore.save(s); setSession(s); setSessionRestored(!!restored); };
+
+    // Connexion sans internet : vérification locale de l'empreinte enregistrée lors d'une connexion en ligne
+    const offlineLogin = async () => {
+      const wait = OfflineCreds.lockLeft();
+      if (wait > 0) throw new Error(`Trop d'essais — patientez ${wait} s`);
+      const r = await OfflineCreds.verify(authShopName, authPassword);
+      if (!r.ok) {
+        if (r.reason === "unsupported") throw new Error("Connexion hors ligne indisponible sur ce navigateur (HTTPS requis). Connectez-vous à internet.");
+        if (r.reason === "unknown") throw new Error("Première connexion sur cet appareil : une connexion internet est nécessaire.");
+        OfflineCreds.fail();
+        throw new Error("Mot de passe incorrect");
+      }
+      OfflineCreds.resetFails();
+      const s = r.session;
+      if (s.subscriptionEnd && getDaysLeft(s.subscriptionEnd) === 0) throw new Error("Abonnement expiré — connectez-vous à internet pour le renouveler.");
+      // sessionRestored = true : la validation du compte se fera au retour du réseau (reconnexion silencieuse)
+      finishLogin({ ...s, offlineLogin: true }, true);
+    };
+
     try {
-      const query = await db.collection("shops").where("shopName", "==", authShopName.trim()).get();
-      if(query.empty) throw new Error("Commerce introuvable");
-      const doc = query.docs[0];
-      const data = doc.data();
-      if(encPwd(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
-      if(data.active === false) throw new Error("Compte désactivé");
-      if(data.sessionActive === false) throw new Error("Session suspendue par l'administrateur — contactez le support");
-      const newSession = { 
-        shopId: doc.id, shopName: data.shopName, shopPhone: data.phone || "", 
-        whatsapp: data.whatsapp, ownerName: data.ownerName, plan: data.plan || "mensuel", 
-        subscriptionEnd: data.subscriptionEnd, adminPin: data.adminPin || btoa("0000"), isDev: false,
-        shopLogo: data.logoBase64 || null,
-        shopAddress: data.shopAddress || "", shopSlogan: data.shopSlogan || "",
-        gerantPin: data.gerantPin || null
-      };
-      SessionStore.save(newSession);
-      setSession(newSession);
-      setSessionRestored(false);
+      if (!db || !navigator.onLine) {
+        await offlineLogin();
+      } else {
+        // « En ligne » ne veut pas dire internet : on n'attend pas plus de 8 s avant de basculer en local
+        let query;
+        try { query = await withTimeout(db.collection("shops").where("shopName", "==", authShopName.trim()).get(), 8000); }
+        catch(e) { if (e && (e.code === "unavailable" || e.code === "deadline-exceeded")) query = "timeout"; else throw e; }
+        if (query === "timeout") {
+          await offlineLogin();
+        } else {
+          if(query.empty) throw new Error("Commerce introuvable");
+          const doc = query.docs[0];
+          const data = doc.data();
+          if(encPwd(authPassword) !== data.password) throw new Error("Mot de passe incorrect");
+          if(data.active === false) throw new Error("Compte désactivé");
+          if(data.sessionActive === false) throw new Error("Session suspendue par l'administrateur — contactez le support");
+          const newSession = { 
+            shopId: doc.id, shopName: data.shopName, shopPhone: data.phone || "", 
+            whatsapp: data.whatsapp, ownerName: data.ownerName, plan: data.plan || "mensuel", 
+            subscriptionEnd: data.subscriptionEnd, adminPin: data.adminPin || btoa("0000"), isDev: false,
+            shopLogo: data.logoBase64 || null,
+            shopAddress: data.shopAddress || "", shopSlogan: data.shopSlogan || "",
+            gerantPin: data.gerantPin || null
+          };
+          // Mémorise l'accès pour les prochaines connexions sans internet (en arrière-plan)
+          OfflineCreds.save(data.shopName || authShopName, authPassword, newSession, data.password).catch(() => {});
+          OfflineCreds.resetFails();
+          finishLogin(newSession, false);
+        }
+      }
     } catch(e) { setAuthError(e.message); }
     setAuthLoading(false);
   };
@@ -3939,9 +4125,12 @@ function App() {
         const doc = await db.collection("shops").doc(session.shopId).get();
         if (!active) return;
         if (doc.exists) {
+          // Réponse issue du cache local (pas de vrai réseau) : on reste en mode hors ligne
+          if (doc.metadata && doc.metadata.fromCache) { if (active) setReAuthPending(false); return; }
           const data = doc.data();
-          if (data.active === false) { logout(); return; }
-          if (data.sessionActive === false) { logout(); return; }
+          if (data.active === false || data.sessionActive === false) { OfflineCreds.removeByShopId(session.shopId); logout(); return; }
+          // Mot de passe changé côté serveur → l'ancien n'ouvre plus le commerce hors ligne
+          OfflineCreds.checkServer(session.shopId, data.password).catch(() => {});
           // Met à jour la session avec les données fraîches
           const refreshed = {
             ...session,
@@ -3963,13 +4152,14 @@ function App() {
       if (active) setReAuthPending(false);
     };
 
-    // Essai immédiat si en ligne
+    // Essai immédiat si en ligne, puis toutes les 30 s tant que la session n'est pas validée
     if (navigator.onLine) { tryReAuth(); }
+    const retry = setInterval(() => { if (navigator.onLine) tryReAuth(); }, 30000);
 
     // Puis écoute le retour de connexion
     const onOnline = () => tryReAuth();
     window.addEventListener("online", onOnline);
-    return () => { active = false; window.removeEventListener("online", onOnline); };
+    return () => { active = false; clearInterval(retry); window.removeEventListener("online", onOnline); };
   }, [sessionRestored]);
 
   if (devMode) {
@@ -4036,9 +4226,11 @@ function App() {
             {authMode==="register" && (<><input placeholder="Nom du propriétaire" value={authOwnerName} onChange={e=>setAuthOwnerName(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} /><input placeholder="WhatsApp" value={authWhatsapp} onChange={e=>setAuthWhatsapp(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} /><input placeholder="Téléphone" value={authPhone} onChange={e=>setAuthPhone(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} /></>)}
             <input type="password" placeholder="Mot de passe" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} />
             {authMode==="register" && <input type="password" placeholder="Confirmer" value={authConfirm} onChange={e=>setAuthConfirm(e.target.value)} style={{background:T.inputBg, border:`1px solid ${T.inputBd}`, borderRadius:14, padding:"14px", color:T.text}} />}
+            {authMode==="login" && !netOnline && <div style={{fontSize:11, color:T.orange, textAlign:"center", lineHeight:1.5}}>📴 Hors ligne — connexion possible avec les identifiants déjà utilisés sur cet appareil.</div>}
             {authError && <div style={{fontSize:12, color:T.red, textAlign:"center"}}>{authError}</div>}
             <button onClick={authMode==="register"?handleRegister:handleLogin} disabled={authLoading} style={{background:T.accent, border:"none", borderRadius:16, padding:"16px", fontWeight:800, fontSize:16, color:T.bg}}>{authLoading ? "..." : (authMode==="register" ? "Créer" : "Se connecter")}</button>
             {authMode==="login" && <button onClick={()=>{setAdminPinMode(true); setAdminPin(""); setAdminPinError(false);}} style={{background:"transparent", border:"none", color:T.purple, fontSize:12, fontWeight:600, padding:"4px"}}>🛡️ Connexion Admin (PIN)</button>}
+            {authMode==="login" && OfflineCreds.count() > 0 && <button onClick={()=>{ if(window.confirm("Effacer l'accès hors ligne de cet appareil ? Une connexion internet sera nécessaire pour se reconnecter.")){ OfflineCreds.clearAll(); setAuthError("Accès hors ligne effacé sur cet appareil."); } }} style={{background:"transparent", border:"none", color:T.textMute, fontSize:10, padding:"2px"}}>🔒 Effacer l'accès hors ligne de cet appareil</button>}
           </div>
         </div>
       </div>
@@ -4088,6 +4280,20 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
   const [pinModalTarget, setPinModalTarget] = useState("admin");
 
   useEffect(() => { const unsub = syncShopData(session.shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers, setCommandes); return unsub; }, [session.shopId]);
+
+  // Photos lourdes (IndexedDB) : réinjectées dans le catalogue juste après l'affichage instantané
+  useEffect(() => {
+    let alive = true;
+    PhotoCache.getAll(session.shopId).then(map => {
+      if (!alive || !map || Object.keys(map).length === 0) return;
+      setProducts(prev => prev.map(p => {
+        if (p.photo || !map[p.id]) return p;
+        const { _ph, ...rest } = p;
+        return { ...rest, photo: map[p.id] };
+      }));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [session.shopId]);
 
   const total = items.reduce((s,i)=>s + (i.amount || 0) * (i.qty || 1), 0);
   
@@ -4880,7 +5086,7 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
                 {allProds.length === 0 ? "Catalogue vide" : "Aucun article trouvé"}
               </div>
               <div style={{fontSize:11, marginBottom:12}}>
-                {allProds.length === 0 ? "Ajoutez vos produits depuis l'espace admin." : "Essayez un autre mot ou une autre catégorie."}
+                {allProds.length === 0 ? (navigator.onLine ? "Ajoutez vos produits depuis l'espace admin." : "Aucun article en mémoire sur cet appareil : connectez-vous une fois à internet pour télécharger le catalogue.") : "Essayez un autre mot ou une autre catégorie."}
               </div>
               {allProds.length > 0 && (
                 <button onClick={()=>{setSearch(""); setActiveCat("Tous"); setShowFavOnly(false);}} style={{background:T.accent, color:T.bg, border:"none", borderRadius:12, padding:"8px 16px", fontWeight:700, fontSize:12}}>Réinitialiser les filtres</button>
