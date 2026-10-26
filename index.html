@@ -176,7 +176,8 @@ try {
   // La solution est de forcer le long-polling (requêtes HTTP simples).
   db.settings({ experimentalForceLongPolling: true, cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED, merge: true });
 
-  db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
+  db.enablePersistence({ synchronizeTabs: true }).then(() => { window.__fsPersist = "ok"; }).catch((err) => {
+    window.__fsPersist = (err && err.code) || "error";
     if (err.code !== "failed-precondition" && err.code !== "unimplemented") {
       console.warn("[Firebase] enablePersistence:", err.code);
     }
@@ -305,8 +306,8 @@ const PhotoCache = {
     if (PhotoCache._p) return PhotoCache._p;
     PhotoCache._p = new Promise((res, rej) => {
       try {
-        const r = indexedDB.open("caissepro_photos", 1);
-        r.onupgradeneeded = () => { r.result.createObjectStore("p"); };
+        const r = indexedDB.open("caissepro_photos", 2);
+        r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains("p")) d.createObjectStore("p"); if (!d.objectStoreNames.contains("c")) d.createObjectStore("c"); };
         r.onsuccess = () => res(r.result);
         r.onerror = () => rej(r.error);
       } catch (e) { rej(e); }
@@ -323,6 +324,24 @@ const PhotoCache = {
         rq.onerror = () => res(out);
       } catch (e) { res(out); }
     });
+  },
+  // Sauvegarde complète du catalogue (sans photos) : filet de sécurité si localStorage est vide ou plein
+  async saveCatalog(shopId, prods) {
+    try {
+      const db = await PhotoCache._open();
+      const items = prods.map(p => (p && p.photo) ? { ...p, photo: null, _ph: 1 } : p);
+      db.transaction("c", "readwrite").objectStore("c").put({ ts: Date.now(), items }, shopId);
+    } catch (e) {}
+  },
+  async loadCatalog(shopId) {
+    try {
+      const db = await PhotoCache._open();
+      return await new Promise(res => {
+        const rq = db.transaction("c", "readonly").objectStore("c").get(shopId);
+        rq.onsuccess = () => res(rq.result || null);
+        rq.onerror = () => res(null);
+      });
+    } catch (e) { return null; }
   },
   // Aligne le cache sur la liste complète des produits (photos ajoutées / supprimées)
   async replace(shopId, prods) {
@@ -342,6 +361,27 @@ const PhotoCache = {
   },
 };
 
+// Réinjecte les photos lourdes (IndexedDB) dans la liste de produits affichée
+function fillPhotos(shopId, setProducts) {
+  PhotoCache.getAll(shopId).then(map => {
+    if (!map || Object.keys(map).length === 0) return;
+    setProducts(prev => prev.map(p => {
+      if (p.photo || !map[p.id]) return p;
+      const { _ph, ...rest } = p;
+      return { ...rest, photo: map[p.id] };
+    }));
+  }).catch(() => {});
+}
+
+// Diagnostic affiché depuis l'écran « catalogue vide »
+async function posDiag() {
+  const id = window.__posShopId;
+  const ls = OfflineStore.get(id, "products").length;
+  let idb = 0;
+  try { const c = await PhotoCache.loadCatalog(id); idb = c && c.items ? c.items.length : 0; } catch (e) { idb = -1; }
+  alert(`Catalogue sur l'appareil : ${ls} article(s)\nSauvegarde IndexedDB : ${idb < 0 ? "indisponible" : idb + " article(s)"}\nCache Firestore : ${window.__fsPersist === "ok" ? "actif" : (window.__fsPersist || "inconnu")}\nRéseau : ${navigator.onLine ? "en ligne" : "hors ligne"}`);
+}
+
 class OfflineStore {
   static get(shopId, type) { try { const d = localStorage.getItem(getStoreKey(shopId, type)); return d ? JSON.parse(d) : []; } catch(e){ return []; } }
   // Copie locale tronquée aux N derniers jours (ventes / mouvements) pour libérer de la place
@@ -353,13 +393,16 @@ class OfflineStore {
       localStorage.setItem(k, JSON.stringify(cur.filter(x => (x.timestamp || 0) >= lim)));
     } catch(e) {}
   }
-  static set(shopId, type, data) {
+  static set(shopId, type, data, opts) {
     const key = getStoreKey(shopId, type);
     let arr = data || [];
     if (type === "products") {
+      // Un résultat de cache vide ne doit jamais effacer le catalogue enregistré
+      if (arr.length === 0 && opts && opts.fromCache) return;
       // Le catalogue doit TOUJOURS pouvoir s'afficher hors ligne : on garde l'essentiel en localStorage
       // (photos lourdes -> IndexedDB) et on libère de la place si le quota est atteint.
-      try { PhotoCache.replace(shopId, arr); } catch(e) {}
+      try { PhotoCache.replace(shopId, arr); PhotoCache.saveCatalog(shopId, arr); } catch(e) {}
+      if (arr.length > 0) { try { localStorage.setItem(getStoreKey(shopId, "products_ts"), String(Date.now())); } catch(e) {} }
       const light = arr.map(p => (p && p.photo && p.photo.length > 6000) ? { ...p, photo: null, _ph: 1 } : p);
       try { localStorage.setItem(key, JSON.stringify(light)); return; } catch(e) {}
       OfflineStore._trim(shopId, "sales", 30); OfflineStore._trim(shopId, "stock_movements", 30);
@@ -536,13 +579,29 @@ function syncShopData(shopId, setProducts, setSales, setStockMovements, setCredi
   if(!db) return ()=>{};
   // Hors ligne avec un cache Firestore vide, le 1er snapshot arrive « vide, depuis le cache » :
   // on garde alors la copie locale au lieu de la remplacer par une liste vide.
-  const keepLocal = (snap, type) => !!(snap.metadata && snap.metadata.fromCache && snap.empty && OfflineStore.get(shopId, type).length > 0);
+  const keepLocal = (snap, type) => {
+    if (!(snap.metadata && snap.metadata.fromCache) || snap.metadata.hasPendingWrites) return false;
+    if (snap.docs.filter(d => d.id !== "_init").length > 0) return false;   // le doc « _init » ne compte pas
+    return OfflineStore.get(shopId, type).filter(x => x && x.id !== "_init").length > 0;
+  };
   const unsubProds = db.collection("shops").doc(shopId).collection("products").onSnapshot(snap => {
-    if (keepLocal(snap, "products")) return;
-    const prods = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(p => p.id !== "_init");
-    OfflineStore.set(shopId, "products", prods);
+    const real = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(p => p.id !== "_init");
+    const cacheOnly = !!(snap.metadata && snap.metadata.fromCache && !snap.metadata.hasPendingWrites);
+    let prods = real;
+    if (cacheOnly) {
+      // Réponse du cache seulement (hors ligne) : jamais autoritaire — le cache peut être vide, partiel ou évincé
+      if (real.length === 0) return;
+      const local = OfflineStore.get(shopId, "products");
+      if (local.length > real.length) {
+        const byId = new Map(local.map(p => [p.id, p]));
+        real.forEach(p => byId.set(p.id, p));
+        prods = Array.from(byId.values());
+      }
+    }
+    OfflineStore.set(shopId, "products", prods, { fromCache: cacheOnly });
     setProducts && setProducts(prods);
-  });
+    if (setProducts && prods.some(p => p && p._ph)) fillPhotos(shopId, setProducts);
+  }, err => console.warn("[products]", err && err.code));
   const unsubSales = db.collection("shops").doc(shopId).collection("sales").onSnapshot(snap => {
     if (keepLocal(snap, "sales")) return;
     const sales = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(s => s.id !== "_init");
@@ -4281,18 +4340,23 @@ function MainApp({ session, T, themeName, setThemeName, logout, flashMsg, sessio
 
   useEffect(() => { const unsub = syncShopData(session.shopId, setProducts, setSales, setStockMovements, setCredits, setCaissiers, setCommandes); return unsub; }, [session.shopId]);
 
-  // Photos lourdes (IndexedDB) : réinjectées dans le catalogue juste après l'affichage instantané
+  // Catalogue : restauration depuis la sauvegarde IndexedDB si la copie rapide est vide, puis photos lourdes
   useEffect(() => {
     let alive = true;
-    PhotoCache.getAll(session.shopId).then(map => {
-      if (!alive || !map || Object.keys(map).length === 0) return;
-      setProducts(prev => prev.map(p => {
-        if (p.photo || !map[p.id]) return p;
-        const { _ph, ...rest } = p;
-        return { ...rest, photo: map[p.id] };
-      }));
-    }).catch(() => {});
-    return () => { alive = false; };
+    window.__posShopId = session.shopId;
+    const restore = async (force) => {
+      let cat = null;
+      try { cat = await PhotoCache.loadCatalog(session.shopId); } catch(e) {}
+      if (!alive) return 0;
+      const saved = cat && cat.items ? cat.items : [];
+      if (saved.length) setProducts(prev => (prev.length && !force) ? prev : saved);
+      fillPhotos(session.shopId, setProducts);
+      return saved.length;
+    };
+    restore(false);
+    const onEvt = async () => { const n = await restore(true); if (!n) alert("Aucune sauvegarde du catalogue sur cet appareil. Connectez-vous une fois à internet pour le télécharger."); };
+    window.addEventListener("pos-restore-catalog", onEvt);
+    return () => { alive = false; window.removeEventListener("pos-restore-catalog", onEvt); };
   }, [session.shopId]);
 
   const total = items.reduce((s,i)=>s + (i.amount || 0) * (i.qty || 1), 0);
@@ -5079,6 +5143,12 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
             </div>
           )}
           {showFavOnly && <div style={{fontSize:10, color:T.accent, marginBottom:8, fontWeight:700}}>⭐ Affichage : favoris uniquement ({favProds.length})</div>}
+          {!navigator.onLine && allProds.length > 0 && (
+            <div style={{fontSize:10, color:T.textMute, margin:"0 0 6px"}}>
+              📴 Catalogue de l'appareil · {allProds.length} article{allProds.length > 1 ? "s" : ""}
+              {(() => { try { const t = parseInt(localStorage.getItem("pos_" + window.__posShopId + "_products_ts") || "0"); return t ? " · mis à jour le " + new Date(t).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : ""; } catch(e) { return ""; } })()}
+            </div>
+          )}
           {filtered.length === 0 ? (
             <div style={{textAlign:"center", padding:"36px 16px", color:T.textMute}}>
               <div style={{fontSize:38, marginBottom:8}}>{allProds.length === 0 ? "📦" : "🔍"}</div>
@@ -5088,6 +5158,12 @@ function CaisseContent({ T, products, addSale, items, setItems, total, flashMsg,
               <div style={{fontSize:11, marginBottom:12}}>
                 {allProds.length === 0 ? (navigator.onLine ? "Ajoutez vos produits depuis l'espace admin." : "Aucun article en mémoire sur cet appareil : connectez-vous une fois à internet pour télécharger le catalogue.") : "Essayez un autre mot ou une autre catégorie."}
               </div>
+              {allProds.length === 0 && (
+                <div style={{display:"flex", gap:8, justifyContent:"center", flexWrap:"wrap", marginBottom:10}}>
+                  <button onClick={()=>window.dispatchEvent(new Event("pos-restore-catalog"))} style={{background:T.accent, color:T.bg, border:"none", borderRadius:12, padding:"8px 16px", fontWeight:700, fontSize:12}}>↻ Restaurer le catalogue de l'appareil</button>
+                  <button onClick={posDiag} style={{background:T.surface2, color:T.text, border:`1px solid ${T.border}`, borderRadius:12, padding:"8px 14px", fontWeight:600, fontSize:12}}>🩺 Diagnostic</button>
+                </div>
+              )}
               {allProds.length > 0 && (
                 <button onClick={()=>{setSearch(""); setActiveCat("Tous"); setShowFavOnly(false);}} style={{background:T.accent, color:T.bg, border:"none", borderRadius:12, padding:"8px 16px", fontWeight:700, fontSize:12}}>Réinitialiser les filtres</button>
               )}

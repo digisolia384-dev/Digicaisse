@@ -1,6 +1,6 @@
 /* Caisse Pro — Service Worker (hors ligne complet)
    Incrémentez VERSION à chaque déploiement pour forcer la mise à jour. */
-const VERSION = "caissepro-v2";
+const VERSION = "caissepro-v3";
 const SHELL_CACHE = VERSION + "-shell";
 const LIB_CACHE = VERSION + "-libs";
 
